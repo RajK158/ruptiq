@@ -27,9 +27,9 @@ Items 1 to 3 do not exist yet; item 4 is in progress (see below). See
 
 ## Current implementation status
 
-Ruptiq Core is only a health-check server. The checkout demo has two independent services, the
-Order Service and the Inventory Service, which do not call each other yet. Ruptiq cannot run load
-tests yet.
+Ruptiq Core is only a health-check server. The checkout demo has three independent services, the
+Order Service, the Inventory Service, and the Payment Service, which do not call each other yet.
+Ruptiq cannot run load tests yet.
 
 | Item | Status |
 | --- | --- |
@@ -41,8 +41,8 @@ tests yet.
 | CI workflow (`go test`, `go vet`, `go test -race`) | Added; the race step has **not run yet** (first run happens on Linux CI) |
 | Checkout demo: Order Service | Done (in-memory storage, see below) |
 | Checkout demo: Inventory Service | Done (in-memory stock and reservations, not yet called by the Order Service) |
-| Checkout demo: Payment Service | Not started |
-| Order-to-inventory integration | Not started |
+| Checkout demo: Payment Service | Done (simulated payments, in-memory, not yet called by the Order Service) |
+| Order-to-inventory and order-to-payment integration | Not started |
 | Workload running, telemetry, investigation, run storage | Not started |
 
 ## Requirements
@@ -98,8 +98,8 @@ test** that Ruptiq will eventually load test. It is **not** part of Ruptiq Core:
 and are lost when the service stops.
 
 **What it does not do:** payment and inventory integration are **not implemented**. There is no
-Payment Service, and the Order Service does not call the Inventory Service. An order with status `created` means *only* that the
-record was created. It does not mean stock was reserved, payment succeeded, or checkout completed.
+Payment Service integration, and the Order Service does not call the Inventory Service. An order
+with status `created` means *only* that the record was created. It does not mean stock was reserved, payment succeeded, or checkout completed.
 The service also has no authentication, no database, and no deliberate slowness or failures yet.
 
 ### Endpoints
@@ -342,6 +342,186 @@ Example responses:
   other service.
 - The seed catalog is fixed and cannot be changed at runtime.
 
+## Checkout demo: Payment Service
+
+The Payment Service is the third piece of the checkout demo. Like the others it is part of the
+**system under test**, not Ruptiq Core. It lives in `demo/checkout/payment-service/`, never imports
+Ruptiq Core or the other checkout services, and is started separately.
+
+**What it does:** it records simulated payment attempts and returns them by ID. Each attempt is
+either `approved` or `declined`, and the caller chooses which by picking a test payment method.
+
+**Why it is a simulation:** there is no payment provider, no credentials, and no card numbers. The
+service exists so Ruptiq has a realistic, correctness-sensitive dependency to test: retries,
+duplicate submissions, and concurrent attempts for the same order are exactly where real payment
+systems go wrong. Requests containing unknown fields (for example a `card_number`) are rejected,
+and request bodies are never logged.
+
+**What it does not do:** it does not move money, call the Order Service, or check inventory. An
+`approved` payment means only that the simulation approved it.
+
+### Endpoints
+
+| Method and path | Success | Description |
+| --- | --- | --- |
+| `GET /healthz` | `200` | `{"status":"ok","service":"payment-service"}` |
+| `POST /payments` | `201` or `200` | Create a simulated payment attempt |
+| `GET /payments/{id}` | `200` | Fetch a payment attempt by ID |
+
+Request body for `POST /payments`:
+
+```json
+{
+  "order_id": "ord_example123",
+  "amount_cents": 24999,
+  "currency": "USD",
+  "payment_method": "test_approve",
+  "idempotency_key": "checkout-attempt-001"
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `order_id` | Required, non-blank, at most 64 characters, no control characters. Whitespace is trimmed. |
+| `amount_cents` | Whole number from 1 to 100,000,000 (that is, up to 1,000,000.00 USD). The limit is a demo sanity check. |
+| `currency` | Must be exactly `USD`. No other currency is supported in the MVP. |
+| `payment_method` | `test_approve` (always approved) or `test_decline` (always declined). |
+| `idempotency_key` | Required, non-blank, at most 128 characters, no control characters. Whitespace is trimmed. |
+
+Unknown fields, malformed JSON, trailing data, and bodies over 4096 bytes are rejected.
+
+Response (`id` and `created_at` differ on every new payment; `status` is `approved` or `declined`):
+
+```json
+{"id":"pay_...","order_id":"ord_example123","amount_cents":24999,"currency":"USD","status":"approved","created_at":"2026-11-05T00:20:33.9115372Z"}
+```
+
+A decline is a normal business outcome: it is returned with `201` like an approval, with
+`"status":"declined"`. It is not an HTTP error.
+
+### Idempotency model
+
+The client supplies an `idempotency_key` with each attempt. The key identifies one logical attempt,
+so a client that is unsure whether its request arrived can safely send it again.
+
+| Situation | Response |
+| --- | --- |
+| New key | `201`, a new payment is recorded |
+| Same key, identical `order_id`, `amount_cents`, `currency`, and `payment_method` | `200` with the **original** payment. Nothing new is created, even for a declined attempt, even if sent many times at once. |
+| Same key, any of those fields different | `409` |
+
+Keys are global to the service, not scoped per order. Rejected requests (`409`, `422`) are not
+recorded, so their keys stay unused.
+
+### Duplicate-approval protection
+
+An order can have **at most one approved payment**.
+
+- If the order already has an approved payment, any new attempt for it with a different key gets
+  `409` (approve or decline).
+- A declined payment does not block the order. A new attempt with a new key can follow it.
+- The idempotency check runs **first**, so retrying the key that produced the approval still
+  returns `200` with that approval, rather than `409`.
+- Concurrent attempts for one order with different keys result in exactly one approval. The check
+  and the creation are one atomic step (see the architecture document).
+
+### Start it
+
+The service listens on port `8083` by default. Set `PAYMENT_SERVICE_PORT` to change it. Logs are
+JSON lines on standard output.
+
+PowerShell:
+
+```powershell
+go run ./demo/checkout/payment-service
+```
+
+```powershell
+$env:PAYMENT_SERVICE_PORT = "9093"
+go run ./demo/checkout/payment-service
+```
+
+Press `Ctrl+C` to stop. Graceful shutdown is implemented but, like the other services, has not
+been verified with a real Ctrl+C run.
+
+### Try it (PowerShell)
+
+Run these in a second terminal while the service is running.
+
+```powershell
+Invoke-RestMethod http://localhost:8083/healthz
+```
+
+Create an approved payment (`201`) and fetch it back:
+
+```powershell
+$body = @{ order_id = "ord_example123"; amount_cents = 24999; currency = "USD"; payment_method = "test_approve"; idempotency_key = "checkout-attempt-001" } | ConvertTo-Json
+$pay = Invoke-RestMethod -Method Post -Uri http://localhost:8083/payments -ContentType "application/json" -Body $body
+$pay
+Invoke-RestMethod "http://localhost:8083/payments/$($pay.id)"
+```
+
+Send the identical request again. It returns the same payment with status `200`:
+
+```powershell
+$r = Invoke-WebRequest -Method Post -Uri http://localhost:8083/payments -ContentType "application/json" -Body $body -UseBasicParsing
+$r.StatusCode   # 200
+$r.Content
+```
+
+Try to pay the same order again with a new key (`409`). In Windows PowerShell, errors are thrown,
+so catch them:
+
+```powershell
+$second = @{ order_id = "ord_example123"; amount_cents = 24999; currency = "USD"; payment_method = "test_approve"; idempotency_key = "checkout-attempt-002" } | ConvertTo-Json
+try {
+    Invoke-WebRequest -Method Post -Uri http://localhost:8083/payments -ContentType "application/json" -Body $second -UseBasicParsing
+} catch {
+    $_.Exception.Response.StatusCode.value__   # 409
+    $_.ErrorDetails.Message                    # {"error":"order already has an approved payment"}
+}
+```
+
+A simulated decline (`201`, status `declined`) for a different order:
+
+```powershell
+$decline = @{ order_id = "ord_declined1"; amount_cents = 1500; currency = "USD"; payment_method = "test_decline"; idempotency_key = "checkout-attempt-003" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8083/payments -ContentType "application/json" -Body $decline
+```
+
+### Errors
+
+Errors are JSON in the form `{"error":"message"}`:
+
+| Status | When |
+| --- | --- |
+| `400` | Malformed JSON, empty body, unknown field, wrong field type, or trailing data |
+| `404` | Payment not found, or unknown path |
+| `405` | Wrong method for a path (the `Allow` header lists the allowed methods) |
+| `409` | Idempotency key reused with different details, or the order already has an approved payment |
+| `413` | Request body larger than 4096 bytes |
+| `422` | Valid JSON but invalid values (missing or blank identifiers, bad amount, unsupported currency or payment method) |
+
+### Current limitations
+
+- **The guarantees hold only within one running process.** Idempotency keys, payments, and the
+  approved-order record live in memory. After a crash or restart they are gone, so a retry could
+  create a second approval. Two replicas of the service would each have separate state and could
+  each approve the same order. Fixing this needs shared durable storage (such as a database
+  constraint), which does not exist yet.
+- No payment is ever refunded, captured, voided, or expired.
+- Idempotency keys are never forgotten or expired while the process runs.
+- One lock guards all state, so payments for different orders do not run in parallel.
+- No authentication, and no deliberate slowness or failures.
+
+### Future integration
+
+Nothing calls the Payment Service yet. The planned checkout flow is: the Order Service creates an
+order, reserves stock with the Inventory Service, then asks the Payment Service to pay, using a
+stable idempotency key per checkout attempt so its own retries are safe. Only then would the order
+be finalized. Those calls, and what to do when a step fails midway (for example releasing a
+reservation after a decline), are not implemented.
+
 ## Test and check
 
 ```sh
@@ -358,7 +538,8 @@ formatted.
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux. The development machine (Windows) has only a 32-bit
 MinGW compiler, so the race detector cannot run there; run the plain `go test ./...` locally. The
-concurrency tests, including 200 simultaneous reservation attempts for 10 units, run without it.
+concurrency tests, including 200 simultaneous reservation attempts for 10 units and 200
+simultaneous payment attempts for one order, run without it.
 
 ## Module path
 
@@ -377,5 +558,9 @@ demo/checkout/inventory-service/         Demo target (NOT Ruptiq Core): Inventor
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging
   internal/inventory/                      stock and reservation rules, seed data, in-memory store
+demo/checkout/payment-service/           Demo target (NOT Ruptiq Core): Payment Service
+  main.go                                  entry point, configuration, graceful shutdown
+  internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging
+  internal/payment/                        payment rules, idempotency, in-memory store
 docs/                                    Design documents
 ```
