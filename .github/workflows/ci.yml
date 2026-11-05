@@ -25,3 +25,9 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      # The race detector needs cgo and a C compiler, which ubuntu-latest
+      # provides. It slows tests down, so it runs as its own step after the
+      # fast checks above.
+      - name: Test with race detector
+        run: go test -race ./...
