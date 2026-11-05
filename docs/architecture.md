@@ -1,9 +1,9 @@
 # Ruptiq Architecture
 
-> **Status: planned design.** Only the HTTP server with `GET /healthz` is implemented today.
-> Nothing described under "Planned boundaries" exists in code yet, and no interfaces have been
-> written. This document records the intended direction so early code does not paint us into a
-> corner.
+> **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, and
+> one checkout demo service (the Order Service, described below). Nothing described under
+> "Planned boundaries" exists in code yet, and no interfaces have been written. This document
+> records the intended direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
 
@@ -31,9 +31,9 @@ Ruptiq has two sides that must stay apart:
 
 1. **Core never imports target code.** No package in Ruptiq Core may import the checkout demo or
    any other target.
-2. **The checkout demo is just a target.** It lives apart from Core (its own directory and its
-   own entry point when it is built) and is the first system Ruptiq tests. It has no special
-   access to Core internals.
+2. **The checkout demo is just a target.** It lives apart from Core, under `demo/checkout/`, with
+   its own entry points, and is the first system Ruptiq tests. It has no special access to Core
+   internals, and it must never import Core packages.
 3. **External targets come in through adapters.** To test a real system (for example one that
    exposes Prometheus metrics), we write an adapter that translates between Core's needs and that
    system. Core does not change.
@@ -76,16 +76,60 @@ runs over time and re-run an investigation on old data. The storage technology i
 3. The results are saved through `RunStore`.
 4. `Investigator` reads the saved run and produces findings.
 
+## Checkout demo: Order Service
+
+The checkout demo is a small, controlled application that Ruptiq will break on purpose. It is
+planned to grow into several services (for example orders, inventory, payment). So far only the
+Order Service exists.
+
+```
+demo/checkout/order-service/
+  main.go            entry point: reads ORDER_SERVICE_PORT, starts the server, shuts down on signal
+  internal/httpapi/  HTTP layer: routes, JSON in and out, status codes, server timeouts
+  internal/order/    domain layer: Order type, validation rules, ID generation, in-memory Store
+```
+
+Boundaries, and how they are enforced:
+
+- **Separate from Core.** The Order Service imports nothing from `cmd/` or `internal/api`, and
+  Core imports nothing from `demo/`. This is a rule we follow and review, not something the
+  compiler checks. Both live in the same Go module for now, so a stray import would still compile.
+- **Private to the service.** Its packages sit under `order-service/internal/`, so Go itself stops
+  any code outside `order-service/` (including Core) from importing them.
+- **HTTP is separate from business logic.** `httpapi` translates requests and responses; `order`
+  owns what a valid order is and how orders are stored. `order` knows nothing about HTTP.
+- **Storage is separate from handlers.** Handlers call `Store.Add` and `Store.Get`. The store is an
+  in-memory map guarded by a `sync.RWMutex`. A database can replace it later without touching the
+  handlers' logic.
+- **Order IDs** come from `crypto/rand` (128 random bits), not from a counter, so they are
+  unguessable and do not collide across restarts.
+
+Status `created` means only that the order record exists. It says nothing about inventory or
+payment, because neither is implemented. Those services, and the calls to them, do not exist yet.
+
+The service has no deliberate delays, failures, or bottlenecks yet. When we add them, they will be
+explicit and configurable, and documented here.
+
+Ruptiq does not test the Order Service yet: Core has no workload runner, telemetry reader, or
+adapter. Today the service is only exercised by its own unit tests and by manual requests.
+
+Some code is duplicated between `cmd/ruptiq-api` and the Order Service (port parsing, shutdown
+wiring). That is deliberate: sharing it would make the target depend on Core.
+
 ## What exists today
 
-- `cmd/ruptiq-api`: program entry point.
-- `internal/api`: HTTP server with `GET /healthz`.
+- `cmd/ruptiq-api`: Ruptiq Core program entry point.
+- `internal/api`: Ruptiq Core HTTP server with `GET /healthz`.
+- `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
+  `GET /orders/{id}`), with in-memory storage.
 
-The four components above, the checkout demo, and any adapters are not implemented.
+The four Core components above, the other checkout demo services, and any adapters are not
+implemented.
 
 ## Decisions deferred
 
-- Where the checkout demo lives in the repository (it must stay separate from Core).
+- Where each further checkout demo service lives (under `demo/checkout/`, separate from Core).
+- Whether the demo eventually gets its own Go module (it shares Core's module for now).
 - Storage technology for `RunStore`.
 - How load is generated.
 - The adapter mechanism for external targets.
