@@ -1,7 +1,7 @@
 # Ruptiq Architecture
 
 > **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, and
-> two checkout demo services (the Order Service and the Inventory Service, described below). Nothing described under
+> three checkout demo services (Order, Inventory, and Payment, described below). Nothing described under
 > "Planned boundaries" exists in code yet, and no interfaces have been written. This document
 > records the intended direction so early code does not paint us into a corner.
 
@@ -80,7 +80,7 @@ runs over time and re-run an investigation on old data. The storage technology i
 
 The checkout demo is a small, controlled application that Ruptiq will break on purpose. It is
 planned to grow into several services (for example orders, inventory, payment). So far the Order
-Service and the Inventory Service exist; they do not call each other.
+Service, the Inventory Service, and the Payment Service exist; none of them calls another.
 
 ```
 demo/checkout/order-service/
@@ -105,7 +105,7 @@ Boundaries, and how they are enforced:
   unguessable and do not collide across restarts.
 
 Status `created` means only that the order record exists. It says nothing about inventory or
-payment, because neither is implemented. Those services, and the calls to them, do not exist yet.
+payment. The Inventory and Payment Services exist, but the Order Service does not call them yet.
 
 The service has no deliberate delays, failures, or bottlenecks yet. When we add them, they will be
 explicit and configurable, and documented here.
@@ -186,6 +186,97 @@ expiry, or confirmation yet, so reserved stock is never returned. State is in me
 restart. There is no authentication and no deliberate delays or failures. The Order Service does
 not call the Inventory Service; that integration is a later step.
 
+## Checkout demo: Payment Service
+
+```
+demo/checkout/payment-service/
+  main.go            entry point: reads PAYMENT_SERVICE_PORT (default 8083), JSON logging,
+                     graceful shutdown
+  internal/httpapi/  HTTP layer: routes, strict JSON decoding, status codes, timeouts,
+                     request logging
+  internal/payment/  domain layer: payment attempts, validation, idempotency, in-memory Store
+```
+
+It follows the same boundary rules as the other services: it imports nothing from Ruptiq Core or
+from the Order and Inventory Services, its packages are private under `payment-service/internal/`,
+and `httpapi` only translates between HTTP and the `payment` package, which knows nothing about
+HTTP.
+
+Endpoints: `GET /healthz`, `POST /payments`, and `GET /payments/{id}`. Status codes: `201` for a
+new payment attempt (approved or declined), `200` for an idempotent replay, `400` malformed body,
+`404` missing payment or path, `405` wrong method, `409` idempotency conflict or order already
+paid, `413` oversized body, `422` invalid values.
+
+### It is a simulation
+
+There is no payment provider, credentials, or card data. `payment_method` is a test switch:
+`test_approve` yields `approved`, `test_decline` yields `declined`. A decline is a business
+outcome, so it is stored and returned like any payment (`201`), not reported as a server error.
+The point of the service is to be a correctness-sensitive dependency: duplicate and concurrent
+payment attempts are a classic failure area, which makes it a good target for Ruptiq. Sensitive
+data is kept out by design: unknown JSON fields (such as a card number) are rejected, and the
+service logs identifiers and outcomes only, never request bodies or idempotency keys.
+
+### Consistency model
+
+The store keeps three indexes behind one `sync.RWMutex`: payments by ID, attempts by idempotency
+key (the normalized request plus the resulting payment ID), and approved orders (order ID to the ID
+of its approved payment). `Store.Create` takes the write lock and, while holding it:
+
+1. Looks up the idempotency key. If it exists with an identical request, return the original
+   payment (`200`). If the request differs, fail with a conflict (`409`).
+2. Checks whether the order already has an approved payment. If so, fail (`409`).
+3. Creates the payment with a `crypto/rand` ID and the outcome the payment method selects.
+4. Updates all indexes together: payment by ID, the key's attempt record, and, for an approval,
+   the approved-order entry.
+
+Step 1 runs before step 2 so a legitimate retry of the approving request still gets its original
+answer after the order is paid. Steps 1 to 4 are one critical section, so:
+
+- Concurrent identical retries: one request creates the payment; every other request sees the
+  key and gets the same payment back.
+- Concurrent attempts with different keys for one order: one creates the approval; every other
+  sees the order is paid and is rejected. There is no window between "is it paid?" and "mark it
+  paid" for a second approval to slip through.
+- All checks happen before any write, so a rejected request leaves no partial state, and rejected
+  attempts are not recorded (their keys stay free).
+
+Key scope: keys are global, not per order. A key reused with a different order is a conflict.
+Requests are compared after whitespace trimming, on `order_id`, `amount_cents`, `currency`, and
+`payment_method`.
+
+A decline never marks the order as paid, so declines can be followed by new attempts. Once an
+order is paid, even a decline attempt with a new key is rejected, because the order is settled.
+
+### Scope of the guarantees
+
+These guarantees hold **within one running process only**. State is in memory, so a crash or
+restart forgets every key and approval, and a retry afterwards could approve the order again. Two
+replicas behind a load balancer would each hold separate state and could each approve the same
+order. Real protection across restarts and replicas needs shared durable storage with a uniqueness
+constraint (for example on the idempotency key and on one approval per order), which is outside
+the current scope. One lock also means payments for different orders do not run in parallel, which
+is acceptable at demo scale.
+
+### Testing
+
+Tests cover the store directly (including its internal indexes after each scenario) and the
+service over HTTP. Concurrency tests run 100 to 200 simultaneous requests: identical retries
+(exactly one creation, the rest replays returning the same payment), distinct keys for one order
+(exactly one approval, no duplicate approved records), many simultaneous declines (all recorded),
+and a mixed workload across several orders that checks the indexes stay consistent. Tests assert on
+counts and relationships, not on fixed IDs or exact timestamps. CI runs them with `go test -race`
+on Linux.
+
+### Future integration
+
+Nothing calls the Payment Service yet. The intended flow is: the Order Service creates an order,
+reserves stock with the Inventory Service (keyed by `order_id`), then requests payment from the
+Payment Service with a stable idempotency key per checkout attempt, and only then finalizes the
+order. Failure handling across the three services (for example releasing a reservation after a
+decline, or recovering when the Order Service crashes midway) is a design problem for a later
+task; neither the calls nor that handling exist today.
+
 ## What exists today
 
 - `cmd/ruptiq-api`: Ruptiq Core program entry point.
@@ -195,8 +286,10 @@ not call the Inventory Service; that integration is a later step.
 - `demo/checkout/inventory-service`: the Inventory Service (`GET /healthz`,
   `GET /inventory/{sku}`, `POST /reservations`), with in-memory stock and idempotent,
   concurrency-safe reservations.
+- `demo/checkout/payment-service`: the Payment Service (`GET /healthz`, `POST /payments`,
+  `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
-The four Core components above, the other checkout demo services, and any adapters are not
+The four Core components above, the calls between checkout demo services, and any adapters are not
 implemented.
 
 ## Decisions deferred
