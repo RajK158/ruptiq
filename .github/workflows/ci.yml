@@ -31,3 +31,60 @@ jobs:
       # fast checks above.
       - name: Test with race detector
         run: go test -race ./...
+
+  # Builds the checkout demo images, starts them with compose.yaml, and runs
+  # real HTTP checkout scenarios against the containers. Independent of the
+  # Go job above, so the two run in parallel.
+  docker-checkout:
+    name: Docker checkout integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show Docker, Compose, curl, and jq versions
+        run: |
+          docker version
+          docker compose version
+          curl --version | head -n 1
+          jq --version
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build images
+        run: docker compose build
+
+      # --wait polls the health checks in compose.yaml and fails if a service
+      # exits or is not healthy within the timeout.
+      - name: Start services and wait until healthy
+        run: docker compose up --detach --wait --wait-timeout 120
+
+      - name: Show service status
+        run: docker compose ps
+
+      - name: Run checkout smoke test
+        run: bash scripts/checkout-smoke-test.sh
+
+      # Diagnostics after any failure above. Each command runs even if an
+      # earlier one fails, so as much state as possible is printed; the job
+      # has already failed and stays failed.
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "::group::docker compose ps --all"
+          docker compose ps --all || echo "docker compose ps failed"
+          echo "::endgroup::"
+          echo "::group::Health check results"
+          for id in $(docker compose ps --all --quiet); do
+            docker inspect --format '{{.Name}}: {{.State.Status}}, exit {{.State.ExitCode}}, health {{json .State.Health}}' "$id" \
+              || echo "docker inspect $id failed"
+          done
+          echo "::endgroup::"
+          echo "::group::docker compose logs"
+          docker compose logs --no-color --timestamps || echo "docker compose logs failed"
+          echo "::endgroup::"
+
+      - name: Shut down and clean up
+        if: always()
+        run: docker compose down --volumes --remove-orphans --rmi all

@@ -1,0 +1,86 @@
+# Ruptiq checkout demo: Order, Inventory, and Payment Services together.
+#
+#   docker compose up --build -d     start (or rebuild) everything
+#   docker compose ps                status and health
+#   docker compose logs -f           follow logs
+#   docker compose down              stop and remove the containers
+#
+# This is the system under test, not Ruptiq Core. All state is in memory:
+# restarting or recreating a container loses its orders, reservations,
+# payments, and idempotency records.
+
+name: ruptiq-checkout
+
+# Settings shared by every service.
+x-checkout-service: &checkout-service
+  build: &checkout-build
+    context: .
+    dockerfile: demo/checkout/Dockerfile
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 15s
+  restart: "no"
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 5
+  start_period: 10s
+
+services:
+  inventory-service:
+    <<: *checkout-service
+    build:
+      <<: *checkout-build
+      args:
+        SERVICE: inventory-service
+    image: ruptiq-checkout/inventory-service:dev
+    environment:
+      INVENTORY_SERVICE_PORT: "8082"
+    ports:
+      - "127.0.0.1:8082:8082"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/healthz"]
+
+  payment-service:
+    <<: *checkout-service
+    build:
+      <<: *checkout-build
+      args:
+        SERVICE: payment-service
+    image: ruptiq-checkout/payment-service:dev
+    environment:
+      PAYMENT_SERVICE_PORT: "8083"
+    ports:
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8083/healthz"]
+
+  order-service:
+    <<: *checkout-service
+    build:
+      <<: *checkout-build
+      args:
+        SERVICE: order-service
+    image: ruptiq-checkout/order-service:dev
+    environment:
+      ORDER_SERVICE_PORT: "8081"
+      # Compose service names, resolved by Docker's network DNS. Not localhost:
+      # inside a container, localhost is that container itself.
+      INVENTORY_SERVICE_URL: "http://inventory-service:8082"
+      PAYMENT_SERVICE_URL: "http://payment-service:8083"
+    ports:
+      - "127.0.0.1:8081:8081"
+    # The Order Service starts without its dependencies, but its reserve and
+    # pay calls fail until they answer, so start it once both are healthy.
+    depends_on:
+      inventory-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/healthz"]

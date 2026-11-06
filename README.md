@@ -45,12 +45,16 @@ Service over HTTP. Ruptiq cannot run load tests yet.
 | Checkout demo: Payment Service | Done (simulated payments, in-memory) |
 | Order-to-inventory integration (`POST /orders/{id}/reserve`) | Done (HTTP/JSON, idempotent by order ID, see below) |
 | Order-to-payment integration (`POST /orders/{id}/pay`) | Done (HTTP/JSON, simulated payments, idempotent by client key, see below) |
+| Docker Compose environment for the checkout demo (`compose.yaml`) | Added; configuration validated with the Compose specification library, **not yet run with Docker** (see below) |
+| Docker checkout integration test in CI (`scripts/checkout-smoke-test.sh`) | Added; the script passed against the services run as plain processes, the CI job has **not run yet** |
 | Cancellation, compensation, reservation release | Not started |
 | Workload running, telemetry, investigation, run storage | Not started |
 
 ## Requirements
 
 - Go 1.27 or newer (see the `go` line in `go.mod`).
+- Optional, for the containerized checkout demo: Docker with the Compose plugin (Docker Desktop
+  on Windows or macOS, or Docker Engine with `docker compose` on Linux).
 
 ## Run Ruptiq API locally
 
@@ -90,6 +94,141 @@ Expected response:
 Press `Ctrl+C` to stop. The server is designed to finish in-flight requests (up to 10 seconds)
 before exiting. This path has not been verified with a real Ctrl+C run yet and has no automated
 test.
+
+## Checkout demo with Docker Compose
+
+`compose.yaml` at the repository root runs the three checkout services together with one
+command. Ruptiq Core is not part of it.
+
+> **Status:** the configuration was checked with the Compose specification library (the parser
+> Docker Compose uses), and the image build steps were reproduced with `go build` for Linux. It
+> has **not yet been run with Docker** on the development machine, because Docker is not
+> installed there. The CI job `Docker checkout integration` (see below) is set up to build and
+> run it on GitHub's Ubuntu runners; it has not run yet.
+
+### Automated smoke test
+
+`scripts/checkout-smoke-test.sh` runs real checkout scenarios over HTTP and stops at the first
+failed check, printing the request, status, and body. It needs `bash`, `curl`, and `jq`, and a
+**freshly started** environment (it asserts the seed stock):
+
+```sh
+docker compose up --build -d --wait
+bash scripts/checkout-smoke-test.sh
+docker compose down
+```
+
+It covers a successful checkout, idempotent repeats (no second stock deduction, the same payment
+returned, no second approval with a new key), and a decline followed by an approval with a new
+key. Override `ORDER_URL`, `INVENTORY_URL`, or `PAYMENT_URL` to point it elsewhere. The CI job runs
+exactly these steps on every push to `main` and every pull request.
+
+### Prerequisites
+
+- Docker with the Compose plugin (`docker compose version` should print a version).
+- Ports `8081`, `8082`, and `8083` free on `127.0.0.1` (stop any `go run` copies of the services).
+- Network access on the first build, to pull `golang:1.27-alpine` and `alpine:3.24`.
+
+### Services and ports
+
+| Service | Compose name | Host URL | URL between containers |
+| --- | --- | --- | --- |
+| Order Service | `order-service` | `http://localhost:8081` | `http://order-service:8081` |
+| Inventory Service | `inventory-service` | `http://localhost:8082` | `http://inventory-service:8082` |
+| Payment Service | `payment-service` | `http://localhost:8083` | `http://payment-service:8083` |
+
+Ports are published on `127.0.0.1` only, so the services are not reachable from other machines.
+Inside the Compose network, the Order Service reaches the others by service name
+(`INVENTORY_SERVICE_URL=http://inventory-service:8082`,
+`PAYMENT_SERVICE_URL=http://payment-service:8083`); `localhost` inside a container means that
+container itself.
+
+### Start, inspect, stop
+
+From the repository root:
+
+```powershell
+docker compose config            # validate and print the resolved configuration
+docker compose up --build -d     # build the images and start everything in the background
+docker compose ps                # each service should show "(healthy)" after a few seconds
+docker compose logs -f order-service   # follow one service's logs (Ctrl+C stops following)
+docker compose down              # stop and remove the containers and the network
+```
+
+Startup order: the Inventory and Payment Services start first; the Order Service starts once both
+report healthy. Every service is checked by calling its own `GET /healthz` every 5 seconds.
+**Healthy only means the process answers `/healthz`**; it does not prove that a checkout works.
+Use the walkthrough below for that.
+
+### Checkout walkthrough (PowerShell)
+
+Once `docker compose ps` shows all three services healthy:
+
+```powershell
+$O = "http://localhost:8081"; $I = "http://localhost:8082"; $P = "http://localhost:8083"
+
+Invoke-RestMethod "$I/inventory/LAPTOP-001"                         # available 10, reserved 0
+
+$order = Invoke-RestMethod -Method Post -Uri "$O/orders" -ContentType "application/json" -Body '{"sku":"LAPTOP-001","quantity":2}'
+Invoke-RestMethod -Method Post -Uri "$O/orders/$($order.id)/reserve"   # status reserved
+Invoke-RestMethod "$I/inventory/LAPTOP-001"                         # available 8, reserved 2
+
+$approve = '{"payment_method":"test_approve","idempotency_key":"checkout-1"}'
+$paid = Invoke-RestMethod -Method Post -Uri "$O/orders/$($order.id)/pay" -ContentType "application/json" -Body $approve
+$paid.order.status                                                  # paid
+Invoke-RestMethod "$P/payments/$($paid.payment.id)"                 # the approved payment
+
+# Repeat both calls with the same identifiers: same reservation, same payment, stock still 8.
+Invoke-RestMethod -Method Post -Uri "$O/orders/$($order.id)/reserve"
+(Invoke-RestMethod -Method Post -Uri "$O/orders/$($order.id)/pay" -ContentType "application/json" -Body $approve).payment.id
+Invoke-RestMethod "$I/inventory/LAPTOP-001"                         # still available 8
+
+# A declined payment leaves a second order reserved.
+$phone = Invoke-RestMethod -Method Post -Uri "$O/orders" -ContentType "application/json" -Body '{"sku":"PHONE-7","quantity":1}'
+Invoke-RestMethod -Method Post -Uri "$O/orders/$($phone.id)/reserve"
+$d = Invoke-RestMethod -Method Post -Uri "$O/orders/$($phone.id)/pay" -ContentType "application/json" -Body '{"payment_method":"test_decline","idempotency_key":"try-1"}'
+$d.payment.status                                                   # declined
+(Invoke-RestMethod "$O/orders/$($phone.id)").status                 # reserved
+```
+
+### State is lost on restart
+
+Every service keeps its data in memory. `docker compose restart`, `docker compose down`, a
+rebuild, or a crash **loses** that service's orders, reservations, payments, and idempotency
+records; inventory goes back to its seed stock. In particular, after the Payment Service restarts,
+a retry with an idempotency key that was already approved creates a **second approved payment**
+(this was observed with the same binaries run as plain processes). Nothing here is restart-safe or
+persistent. Containers are set to `restart: "no"` so that a crash is visible instead of silently
+replaced by an empty service.
+
+### Troubleshooting
+
+- **`docker` is not recognized / cannot connect to the Docker daemon**: install or start Docker
+  Desktop, then check `docker version` and `docker compose version`.
+- **`Bind for 127.0.0.1:8081 failed: port is already allocated`** (or 8082, 8083): another
+  process uses the port, often a `go run` copy of a service. Find it with
+  `Get-NetTCPConnection -LocalPort 8081 -State Listen` and stop it, then run `docker compose up -d`
+  again.
+- **A service stays `(health: starting)` or becomes `(unhealthy)`**: read its logs with
+  `docker compose logs <service>`. `docker inspect --format '{{json .State.Health}}' <container>`
+  shows the last health check results.
+- **`order-service` does not start ("dependency failed to start")**: the Inventory or Payment
+  Service did not become healthy; fix that one first.
+- **Reserve or pay returns `503`**: the Order Service cannot reach a dependency. Check
+  `docker compose ps`, and that `docker compose config` shows the service-name URLs above.
+- **Code changes are not picked up**: rebuild with `docker compose up --build -d`.
+- **Unexpected data, or a fresh start is needed**: `docker compose down`, then
+  `docker compose up -d` (all state is reset).
+
+### Container details
+
+- One multi-stage `demo/checkout/Dockerfile` builds any of the three services, chosen by the
+  `SERVICE` build argument. The build stage (`golang:1.27-alpine`) compiles a static Linux binary
+  with `CGO_ENABLED=0`; the runtime stage is `alpine:3.24` with only that binary.
+- Containers run as a non-root user (UID `10001`), with a read-only root filesystem, all Linux
+  capabilities dropped, and `no-new-privileges`.
+- The root `.dockerignore` is an allow-list: only `go.mod` and `demo/checkout/` (without tests) are
+  sent to the build, so Ruptiq Core and `.git` never enter these images.
 
 ## Checkout demo: Order Service
 
@@ -815,5 +954,9 @@ demo/checkout/payment-service/           Demo target (NOT Ruptiq Core): Payment 
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging
   internal/payment/                        payment rules, idempotency, in-memory store
+demo/checkout/Dockerfile                 One multi-stage image definition for the three services
+compose.yaml                             Runs the three checkout services together (Docker Compose)
+scripts/checkout-smoke-test.sh           End-to-end checkout test over HTTP (used by CI)
+.dockerignore                            Allow-list for Docker build contexts
 docs/                                    Design documents
 ```
