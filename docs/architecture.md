@@ -506,6 +506,74 @@ followed, at most 64 KiB read, base URL validated at startup, no automatic retri
 - The price catalog is fixed test data inside the Order Service.
 - The two Payment Service `409` cases are told apart by their documented messages.
 
+## Checkout demo containers (Docker Compose)
+
+`compose.yaml` (repository root) runs the three checkout services as one environment. It packages
+the existing binaries unchanged; no business logic was modified for containers.
+
+```
+host (127.0.0.1 only)          Compose network "ruptiq-checkout_default"
+  :8081 ──> order-service ──── http://inventory-service:8082 ──> inventory-service
+                          └─── http://payment-service:8083 ────> payment-service
+  :8082 ──────────────────────────────────────────────────────> inventory-service
+  :8083 ──────────────────────────────────────────────────────> payment-service
+```
+
+- **Images.** One multi-stage `demo/checkout/Dockerfile`, parameterized by the `SERVICE` build
+  argument (the service's directory name). Build stage: `golang:1.27-alpine`, matching `go.mod`,
+  compiling a static Linux binary (`CGO_ENABLED=0`, `-trimpath`). Runtime stage: `alpine:3.24`
+  plus the binary. Alpine was chosen over a shell-less image so that its busybox `wget` can run the
+  health checks without adding code or packages to the services.
+- **Independence from Core.** The Dockerfile lives under `demo/checkout/`, and the root
+  `.dockerignore` is an allow-list that sends only `go.mod` and `demo/checkout/` (minus tests) to
+  the builder. Core code cannot enter these images, and Core has no Docker setup.
+- **Service discovery.** The Order Service gets `INVENTORY_SERVICE_URL` and `PAYMENT_SERVICE_URL`
+  set to Compose service names. The existing URL validation accepts them unchanged.
+- **Health and startup.** Each service is checked with `GET /healthz` (every 5 s, 3 s timeout, 5
+  retries, 10 s start period). The Order Service `depends_on` the other two with
+  `condition: service_healthy`. This only orders startup: a healthy check means the process
+  answers HTTP, not that checkout works end to end, and it does not keep watching dependencies
+  after startup.
+- **Hardening.** Non-root user (UID 10001), read-only root filesystem, all capabilities dropped,
+  `no-new-privileges`, host ports bound to `127.0.0.1`. The services write no files, so the
+  read-only filesystem needs no exceptions. `stop_grace_period` is 15 s, above the services' 10 s
+  graceful shutdown; the binary is PID 1 (exec-form `ENTRYPOINT`), so it receives SIGTERM directly.
+- **No automatic restart** (`restart: "no"`). All state is in memory, so an automatic restart would
+  silently replace a crashed service with an empty one; a stopped container is easier to notice.
+
+### State and restarts
+
+Nothing is persisted. Restarting or recreating any container loses its state: orders, inventory
+reservations (stock returns to seed values), payments, and idempotency records. The cross-service
+guarantees from the integration sections hold only while all three processes keep running. After a
+Payment Service restart, retrying an already-approved key creates a second approved payment; this
+was demonstrated with the same binaries run as plain processes (approved `201`, replay `200`,
+restart, same request `201` with a new payment ID). Durable storage is out of scope for now.
+
+### Verification status
+
+The Compose file was loaded and schema-validated with `compose-spec/compose-go` v2.16.2 (the
+library behind `docker compose config`), and the build step was reproduced by cross-compiling all
+three services for Linux from a copy of exactly the files the `.dockerignore` admits. The images
+have **not** been built and the environment has **not** been run with Docker yet, because Docker
+was unavailable on the development machine.
+
+Real container verification is delegated to CI. The `docker-checkout` job in
+`.github/workflows/ci.yml` runs on `ubuntu-latest`, in parallel with the Go job:
+
+1. Print Docker, Compose, curl, and jq versions (fails if any is missing).
+2. `docker compose config --quiet`, then `docker compose build`.
+3. `docker compose up --detach --wait --wait-timeout 120`: Compose polls the health checks and
+   fails if any service exits or is not healthy within 120 s. No fixed sleeps.
+4. `bash scripts/checkout-smoke-test.sh`: real HTTP checkout scenarios with exact status and body
+   assertions (successful checkout, idempotent repeats, decline then approval).
+5. On failure: `docker compose ps --all`, each container's health check history, and all logs.
+6. Always: `docker compose down --volumes --remove-orphans --rmi all`.
+
+The workflow keeps `permissions: contents: read`, and the job has a 20-minute timeout. A passing
+health check only means each process answers `/healthz`; the smoke test is what shows that a
+checkout works across the three containers.
+
 ## What exists today
 
 - `cmd/ruptiq-api`: Ruptiq Core program entry point.
@@ -520,8 +588,11 @@ followed, at most 64 KiB read, base URL validated at startup, no automatic retri
 - `demo/checkout/payment-service`: the Payment Service (`GET /healthz`, `POST /payments`,
   `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
-The four Core components above, cancellation and compensation across services, and any adapters
-are not implemented.
+- `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
+  checkout services (configuration validated, not yet run with Docker).
+
+The four Core components above, cancellation and compensation across services, persistence, and
+any adapters are not implemented.
 
 ## Decisions deferred
 
