@@ -22,14 +22,15 @@ The first usable version is planned to cover:
 3. An investigation step that analyzes a run and reports a likely bottleneck.
 4. A separate checkout demo application used as the first test target.
 
-Item 1 has started: Ruptiq can run a short HTTP GET load test with k6 and report the results, but
-does not record runs yet. Items 2 and 3 do not exist yet; item 4 is in progress (see below). See
+Item 1 has started: Ruptiq can run a short HTTP GET load test with k6, save its results as a JSON
+file, and compare two saved results, but has no run history yet. Items 2 and 3 do not exist yet; item 4 is in progress (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
 
-Ruptiq Core has a health-check server and `ruptiq-run`, a command that runs one HTTP GET load test
-with [k6](https://k6.io) against any URL and reports what k6 measured. The checkout demo has three
+Ruptiq Core has a health-check server; `ruptiq-run`, a command that runs one HTTP GET load test
+with [k6](https://k6.io) against any URL and reports what k6 measured; and `ruptiq-compare`, which
+compares two saved `ruptiq-run` results offline. The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP.
@@ -50,6 +51,7 @@ the Payment Service over HTTP.
 | Docker Compose environment for the checkout demo (`compose.yaml`) | Done; built and run with Docker by CI on GitHub Actions (Docker is not installed on the development machine) |
 | Docker checkout integration test in CI (`scripts/checkout-smoke-test.sh`) | Done; passing on GitHub Actions against the three containers |
 | Load test runner (`ruptiq-run`, k6 adapter) | Done for one HTTP GET workload; unit tested with a fake k6, and run against the real k6 v2.3.0 (see below) |
+| Offline comparison of two saved runs (`ruptiq-compare`) | Done; descriptive only (no significance testing, no diagnosis); unit tested, and run on real saved k6 results (see below) |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry, investigation, run storage, load ramps | Not started |
 
@@ -230,6 +232,141 @@ times, and the metrics above, using the same names), and `verdict`; or `error` a
 - The complete URL is in k6's environment while it runs, readable by the same user (and
   administrators) through process inspection tools.
 - The JSON results format may still change (`schema_version` will be raised when it does).
+
+## Compare two saved runs (`ruptiq-compare`)
+
+`ruptiq-compare` reads two results files written by `ruptiq-run -out`, a **baseline** and a
+**candidate**, and shows how the candidate's measurements differ. It only reads the two files: it
+does not run k6 and does not contact the target.
+
+### Create two saved runs
+
+Run the same workload twice with the same settings, saving each result. Typically you change
+something in between (a new build of the target, a configuration change) and run again:
+
+```powershell
+go run ./cmd/ruptiq-run -url http://localhost:8082/inventory/LAPTOP-001 -out baseline.json
+# ... change the target ...
+go run ./cmd/ruptiq-run -url http://localhost:8082/inventory/LAPTOP-001 -out candidate.json
+```
+
+### Compare them
+
+```powershell
+go run ./cmd/ruptiq-compare -baseline baseline.json -candidate candidate.json
+go run ./cmd/ruptiq-compare -baseline baseline.json -candidate candidate.json -out comparison.json
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-baseline` | The saved run to compare against (required). |
+| `-candidate` | The saved run being judged (required). |
+| `-out` | Also write the comparison as JSON to this file (optional). It may not be one of the inputs. |
+
+### Example: two real runs with nothing changed
+
+These are two real `ruptiq-run` results with the default settings, taken back to back against the
+same, unchanged Inventory Service on the development machine (k6 v2.3.0, Windows, service run as a
+plain process):
+
+```
+Ruptiq run comparison (candidate compared with baseline)
+  Target:    http://127.0.0.1:8082/inventory/LAPTOP-001
+  Load:      2 virtual users, 5s configured
+  Baseline:  baseline.json (k6 v2.3.0, started 2026-11-06T11:36:34Z, measured 5.00s, PASSED)
+  Candidate: candidate.json (k6 v2.3.0, started 2026-11-06T11:36:39Z, measured 5.00s, PASSED)
+
+  Metric                 Baseline   Candidate   Change    Change %           Assessment
+  Average latency (ms)   0.539      0.434       -0.105    -19.5%             better (lower is better)
+  p50 latency (ms)       0.536      0.529       -0.007    -1.4%              better (lower is better)
+  p95 latency (ms)       1.057      0.751       -0.305    -28.9%             better (lower is better)
+  Requests per second    3173.6     3873.7      +700.0    +22.1%             higher (generally better)
+  HTTP failure rate      0.00%      0.00%       0.00 pp   -                  unchanged
+  Failed requests        0          0           0         n/a (baseline 0)   not assessed
+  Total requests         15870      19370       +3500     +22.1%             not assessed
+
+Caveats:
+  - Each side is a single run. Ruptiq does not measure run-to-run variation or statistical significance, so small differences may be noise; repeat both runs before drawing conclusions.
+  - Only the target URL, virtual users, and configured duration were checked. Ruptiq cannot tell whether the target's code, data, configuration, or the machines and network changed between runs.
+```
+
+Nothing changed between these runs, yet throughput differs by 22% and p95 latency by 29%. On a
+busy development machine, sub-millisecond latencies and short runs are dominated by noise. Treat
+differences of this size as meaningless unless they repeat across several runs on both sides.
+
+A comparison where the candidate got worse and had failures (from the test fixtures in
+`internal/comparison/testdata`, made-up numbers, not a measurement) looks like this:
+
+```
+  Metric                 Baseline   Candidate   Change     Change %           Assessment
+  Average latency (ms)   2.000      2.500       +0.500     +25.0%             worse (lower is better)
+  p50 latency (ms)       1.500      1.500       0.000      0.0%               unchanged
+  p95 latency (ms)       4.000      5.000       +1.000     +25.0%             worse (lower is better)
+  Requests per second    2000.0     1600.0      -400.0     -20.0%             lower (generally worse)
+  HTTP failure rate      0.00%      1.00%       +1.00 pp   -                  worse (lower is better)
+  Failed requests        0          80          +80        n/a (baseline 0)   not assessed
+  Total requests         10000      8000        -2000      -20.0%             not assessed
+```
+
+### How to read it
+
+- **Change** is candidate minus baseline. **Change %** is that change relative to the baseline.
+  It is shown as `n/a (baseline 0)` when the baseline is 0, because no relative change exists.
+- **Failure rates** are compared in **percentage points** (`pp`): 0.00% to 1.00% is `+1.00 pp`.
+  A relative change of a rate is not shown.
+- **Assessment** describes the direction only. Lower latency and a lower failure rate are
+  `better`. Higher throughput is `higher (generally better)`: with a fixed number of virtual
+  users, throughput rises whenever requests finish sooner, including when they fail fast, so it
+  is not proof of a better system on its own. Request counts are `not assessed`.
+- There is **no overall verdict** and no threshold: the command describes differences, it does
+  not decide whether the candidate is acceptable.
+
+### Which comparisons are meaningful
+
+Ruptiq refuses to compare runs whose **target URL, number of virtual users, or configured
+duration** differ (exit status `1`), and lists every difference. Runs that completed but
+**failed** their pass criteria are accepted, because comparing failure behavior is useful; the
+failure is listed under the caveats.
+
+Matching settings do not make two runs equivalent experiments. A comparison is meaningful only if
+everything you did not deliberately change stayed the same: the machine running k6, the target's
+host and its other load, the target's data, and the network. Ruptiq cannot check any of that, and
+the caveats say so on every comparison.
+
+**Redacted URLs.** Saved results contain the target URL with its user information and query string
+replaced by `xxxxx`. Two runs against `...?region=eu` and `...?region=us` are both stored as
+`...?xxxxx` and look identical, so Ruptiq cannot tell them apart; a caveat appears whenever the
+stored URL is redacted. Keep track of which query you used yourself.
+
+### Validation and exit status
+
+Each file must be a schema version 1 `ruptiq-run` result for a **completed** run. A file recording
+a run that could not complete (k6 missing, timeout) is rejected, as is any file with missing,
+`null`, non-finite, or negative values, unknown fields, latency percentiles out of order, or
+derived values that disagree with their inputs (for example a failure rate that is not failed ÷
+total requests). Nothing missing is ever treated as zero.
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | The runs were compared. |
+| `1` | The runs are not comparable; no comparison was made. |
+| `2` | Invalid flags. |
+| `3` | A file could not be read, or is malformed, unsupported, or records an incomplete run. |
+
+With `-out`, the JSON file is written in every case after the flags are accepted, so an older
+comparison is never left behind looking current. It contains `schema_version` and either
+`comparison` (both runs, every metric with `baseline`, `candidate`, `change`, `change_percent`, or
+`change_percentage_points` for the failure rate, `direction`, `assessment`, and the `caveats`) or
+`error` (and `mismatches` when the runs were not comparable). `change_percent` is `null` when it
+does not apply, with the reason in `change_percent_note`.
+
+### Limitations
+
+- One run per side. No repeated runs, averages, confidence intervals, or significance tests.
+- Only the summary numbers saved by `ruptiq-run` are compared; there are no per-request data or
+  time series, and no telemetry from the target.
+- No diagnosis: the comparison says what changed, not why.
+- Redacted URLs cannot prove that two runs used the same query string or credentials.
 
 ## Checkout demo with Docker Compose
 
@@ -1075,9 +1212,12 @@ The Go module path is `github.com/RajK158/ruptiq`, matching the GitHub repositor
 ```
 cmd/ruptiq-api/                          Ruptiq Core: program entry point
 cmd/ruptiq-run/                          Ruptiq Core: load test command (flags, report, JSON results)
+cmd/ruptiq-compare/                      Ruptiq Core: run comparison command (flags, files, exit codes)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
+internal/comparison/                     Ruptiq Core: reads and validates saved runs, compares them,
+                                         console output
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors

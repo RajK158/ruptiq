@@ -2,7 +2,8 @@
 
 > **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, a
 > first `WorkloadRunner` (one HTTP GET workload run with k6, see "WorkloadRunner: k6 adapter"
-> below), and three checkout demo services (Order, Inventory, and Payment). `TelemetryReader`,
+> below), offline comparison of two saved runs (see "Run comparison"), and three checkout demo
+> services (Order, Inventory, and Payment). `TelemetryReader`,
 > `Investigator`, and `RunStore` do not exist in code yet. This document records the intended
 > direction so early code does not paint us into a corner.
 
@@ -191,6 +192,113 @@ Not covered: secrets in the URL path, and the process environment of the running
 
 Constant load from one local k6 process, GET only, one URL, no headers or bodies, no ramps. Results
 are client-side only and are not stored.
+
+## Run comparison
+
+`ruptiq-compare` compares two saved run reports (the `workload.Report` JSON that
+`ruptiq-run -out` writes): a baseline and a candidate. It is offline and descriptive: it reads two
+files, never runs a workload or contacts a target, and makes no pass/fail or significance claim.
+
+```
+cmd/ruptiq-compare/      CLI: flags, reading files (1 MiB limit), exit codes, atomic JSON output
+internal/comparison/
+  report.go              DecodeReport: strict decoding and validation of one saved report
+  compare.go             Compare: comparability check, per-metric changes, caveats; JSON model
+  render.go              WriteText: the console table
+```
+
+The package does no file I/O: `DecodeReport` takes bytes, `WriteText` takes an `io.Writer`.
+It reads the existing report model rather than defining a second one, and does not change it.
+
+### Reading a saved report
+
+`workload.Report` decodes missing numbers as zero, which would turn an incomplete file into
+invented measurements. `DecodeReport` therefore decodes into a mirror of the report with pointer
+fields and rejects unknown fields and trailing data, then requires:
+
+- `schema_version` 1 (`ErrUnsupportedSchema` otherwise);
+- a completed run: a report holding `error` is `ErrIncompleteRun`; one with both `run` and `error`
+  is invalid;
+- every field present and not `null`; every number finite and non-negative; at least one request;
+  whole-second configured duration within the runner's limits; `finished_at` not before
+  `started_at`; an absolute http(s) target URL;
+- consistency: `failed_requests <= http_requests`; `failure_rate` equal to failed ÷ total and
+  `requests_per_second` equal to total ÷ measured duration (relative tolerance 1e-9, enough for
+  floating-point rounding only); `min <= p50 <= p90 <= p95 <= max` and `min <= avg <= max`; and
+  `verdict.passed` equal to what `workload.Evaluate` gives for the metrics and the stored
+  `max_failure_rate`.
+
+All problems in a report are listed together (`ErrInvalidReport`). A completed run whose verdict is
+failed is valid input.
+
+### Comparability
+
+`Compare` returns `*IncomparableError`, listing every difference, unless both runs have the same
+stored target URL, virtual users, and configured duration. Stored URLs are compared exactly; since
+`ruptiq-run` stores them redacted (user information and query replaced by `xxxxx`), two runs that
+used different query strings or credentials are indistinguishable. This is reported as a caveat on
+every comparison whose URL is redacted; it cannot be checked.
+
+Passing this check does not make the runs equivalent experiments. The target's build, data, and
+host, the load generator's machine, and the network are not recorded, so they cannot be checked.
+A caveat says so on every comparison.
+
+### Metrics and calculations
+
+| Key | Unit | Preference | Change shown as |
+| --- | --- | --- | --- |
+| `latency_avg_ms`, `latency_p50_ms`, `latency_p95_ms` | ms | lower is better | absolute and % |
+| `requests_per_second` | requests/s | higher is generally better | absolute and % |
+| `failure_rate` | ratio (0–1) | lower is better | percentage points |
+| `failed_requests`, `http_requests` | requests | not assessed | absolute and % |
+
+- `change = candidate - baseline`.
+- `change_percent = (candidate - baseline) × 100 ÷ baseline`, only when the baseline is not 0;
+  otherwise `null` with the note `baseline is 0` (including 0 to 0). Multiplying before dividing
+  keeps results exact for exactly representable inputs.
+- For the failure rate, `change_percentage_points = candidate × 100 - baseline × 100`, and no
+  relative change is reported.
+- `direction` is `increase`, `decrease`, or `unchanged` (exact equality). `assessment` follows the
+  preference: `better`/`worse` for latency and failure rate, `generally_better`/`generally_worse`
+  for throughput, `unchanged`, or `not_assessed` for counts.
+
+Throughput is only "generally" better because the load model is closed: each virtual user sends
+its next request when the previous one ends, so throughput rises whenever requests end sooner,
+including when they fail fast. When throughput and failure rate rise together, a caveat says so.
+
+### Caveats
+
+Always: each side is a single run (no variation or significance measured), and only URL, virtual
+users, and duration were checked. When they apply: redacted URL, different runner or runner
+version, candidate started before baseline, nonzero failure rate (latency includes failed
+requests, which k6 may time as 0 ms), throughput rising with failures, different pass criteria,
+and each run that failed its pass criteria (with its recorded reasons).
+
+### Output
+
+The console table shows baseline, candidate, change, change %, and assessment per metric, then
+the caveats. The optional JSON file is a `comparison.Report` (`schema_version` 1) with either
+`comparison` or `error` (plus `mismatches` when the runs were not comparable), written through a
+temporary file and rename. It is written for every failed comparison too, so an earlier result is
+never left looking current, and `-out` may not name an input file.
+
+### Testing
+
+No k6 or Docker is needed. Deterministic fixtures in `internal/comparison/testdata` use exactly
+representable values, so the expected changes are asserted exactly (for example `+0.5 ms` and
+`+25%`, `-400 requests/s` and `-20%`, `+1 pp`, and `n/a` from a zero baseline). One fixture is an
+unedited real `ruptiq-run` report. Tests cover improvement, regression, throughput up and down,
+increased failure rate, zero baselines (including 0 to 0), different URLs (including a difference
+hidden by redaction), VUs, and durations, 35 missing, invalid, or inconsistent fields and 6
+malformed files (empty, truncated, trailing data, oversized, and others), unsupported
+schema versions, incomplete runs, completed but failed runs, every caveat, the exact console
+output, the JSON fields, and the CLI's exit codes and output file.
+
+### Limitations
+
+One run per side; no repetition, aggregation, confidence intervals, or significance testing. Only
+the saved summary numbers are compared (no per-request data or time series, no target
+telemetry). No diagnosis of causes. Redacted URLs limit what the comparability check can prove.
 
 ## Checkout demo: Order Service
 
@@ -697,6 +805,8 @@ checkout works across the three containers.
 - `internal/api`: Ruptiq Core HTTP server with `GET /healthz`.
 - `cmd/ruptiq-run`, `internal/workload`, `internal/workload/k6`: the first `WorkloadRunner`, one
   HTTP GET workload run with k6, with a CLI report and JSON results.
+- `cmd/ruptiq-compare`, `internal/comparison`: offline, descriptive comparison of two saved run
+  reports.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -710,8 +820,8 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-`TelemetryReader`, `Investigator`, `RunStore`, load ramps, cancellation and compensation across
-services, persistence, and target adapters are not implemented.
+`TelemetryReader`, `Investigator`, `RunStore` (run history), load ramps, cancellation and
+compensation across services, persistence, and target adapters are not implemented.
 
 ## Decisions deferred
 

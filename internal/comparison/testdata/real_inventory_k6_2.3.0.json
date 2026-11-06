@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "run": {
+    "runner": "k6",
+    "runner_version": "2.3.0",
+    "target_url": "http://127.0.0.1:8082/inventory/LAPTOP-001",
+    "vus": 2,
+    "configured_duration_seconds": 5,
+    "started_at": "2026-11-06T11:36:34.5268677Z",
+    "finished_at": "2026-11-06T11:36:39.8585591Z",
+    "metrics": {
+      "duration_seconds": 5.0006033,
+      "http_requests": 15870,
+      "failed_requests": 0,
+      "failure_rate": 0,
+      "requests_per_second": 3173.617071364169,
+      "latency_ms": {
+        "avg": 0.5386182230623883,
+        "min": 0,
+        "p50": 0.5359,
+        "p90": 0.7279,
+        "p95": 1.0566649999999997,
+        "max": 33.8959
+      }
+    }
+  },
+  "verdict": {
+    "passed": true,
+    "max_failure_rate": 0
+  }
+}
