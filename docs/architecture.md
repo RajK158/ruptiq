@@ -1,9 +1,10 @@
 # Ruptiq Architecture
 
-> **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, and
-> three checkout demo services (Order, Inventory, and Payment, described below). Nothing described under
-> "Planned boundaries" exists in code yet, and no interfaces have been written. This document
-> records the intended direction so early code does not paint us into a corner.
+> **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, a
+> first `WorkloadRunner` (one HTTP GET workload run with k6, see "WorkloadRunner: k6 adapter"
+> below), and three checkout demo services (Order, Inventory, and Payment). `TelemetryReader`,
+> `Investigator`, and `RunStore` do not exist in code yet. This document records the intended
+> direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
 
@@ -52,6 +53,8 @@ Responsible for applying load to a target: how many users or requests, for how l
 ramps up. It reports what it did and the client-side results (such as response times and
 failures). It must not know what the target does internally.
 
+A first version exists (constant load only, no ramps); see "WorkloadRunner: k6 adapter" below.
+
 ### TelemetryReader
 
 Responsible for reading the target's own signals during a run, such as CPU, memory, queue depth, or
@@ -75,6 +78,119 @@ runs over time and re-run an investigation on old data. The storage technology i
 2. `WorkloadRunner` applies load while `TelemetryReader` collects telemetry.
 3. The results are saved through `RunStore`.
 4. `Investigator` reads the saved run and produces findings.
+
+## WorkloadRunner: k6 adapter
+
+The first real Core capability: run one HTTP GET workload with [k6](https://k6.io) as an external
+process and report its client-side results. It does not import or know about the checkout demo.
+
+```
+cmd/ruptiq-run/          CLI: flags, validation, timeout and Ctrl+C, report, JSON results file
+internal/workload/       Spec (URL, VUs, duration) and Validate; Result and Metrics; the Runner
+                         interface; Evaluate (pass/fail); Report (the JSON file); URL redaction
+internal/workload/k6/    Runner: implements workload.Runner by running the k6 program;
+                         scripts/http_get.js (embedded); parser for k6's summary
+```
+
+`workload.Runner` is one method, `Run(ctx, spec) (Result, error)`, defined with its first
+implementation rather than up front. A `Result` holds only measured values; a run that could not
+finish, or whose results cannot be trusted, is an error, never a partial `Result`.
+
+### How a run works
+
+1. `Spec.Validate` checks everything before any process starts: an absolute `http`/`https` URL
+   with a host, valid port, no fragment, no spaces or control characters, at most 2048 characters;
+   1 to 1000 VUs; 1 s to 1 h in whole seconds.
+2. `exec.LookPath` finds k6. Not found maps to `k6.ErrNotInstalled` with an install hint.
+3. A fresh `os.MkdirTemp` directory receives the embedded script; it is removed when `Run`
+   returns, together with k6's summary file.
+4. k6 is started with `exec.CommandContext`, without a shell, and every value as a separate
+   argument:
+   `run --quiet --no-color --no-usage-report --summary-mode compact --new-machine-readable-summary
+   --summary-export <dir>/summary.json --include-system-env-vars=true --vus N --duration Ns
+   <dir>/http_get.js`.
+   The target URL goes in the `RUPTIQ_TARGET_URL` environment variable, so it is not in the
+   process list. Inherited `K6_*` variables are removed: k6 reads options from them, and for
+   example `K6_SUMMARY_MODE=disabled` silently stops k6 from writing the summary file.
+5. k6's stdout and stderr go to one buffer that keeps the last 4 KiB (a failing run prints a
+   warning per request: 8,162 lines in a 2-second test against a closed port). Once output has
+   been dropped, the first kept line is dropped as well, because it starts at an arbitrary byte,
+   possibly inside a URL. The rest is passed through `workload.RedactText` before it is used in
+   an error (see "Redaction" below).
+6. When the context ends (Ruptiq's timeout or Ctrl+C), k6 is killed; `WaitDelay` (5 s) bounds the
+   wait for its output pipes. The error wraps `context.DeadlineExceeded` or `context.Canceled`.
+7. A nonzero k6 exit becomes `*k6.ExitError` with the status and output tail (for example `107`
+   for a script error). On exit status 0, the summary file is read (at most 8 MiB) and parsed.
+
+### Reading k6's results
+
+Ruptiq reads k6's machine-readable summary (format `1.x`, from `--new-machine-readable-summary`),
+not the older `--summary-export` format: the newer one is versioned, includes the measured test
+duration, and reports failures as plain `matches`/`total` counts. The parser requires, and never
+defaults:
+
+- `config.duration` > 0 (seconds), which is the measured run time;
+- `http_reqs` (counter) `count`: a whole number. Zero, or no HTTP metrics at all (k6 omits them
+  when no request was sent), is `k6.ErrNoRequests`;
+- `http_req_failed` (rate) `matches`, `total`, `rate`, consistent with each other;
+- `http_req_duration` (trend, time) `avg`, `min`, `med`, `p90`, `p95`, `max` in milliseconds,
+  non-negative.
+
+Missing values, JSON `null`, wrong types, non-integer counts, duplicate metrics, and unknown format
+versions are `k6.ErrSummary`. Requests per second is the only derived value
+(`count / config.duration`), because this format reports no counter rates.
+
+### Judging the run
+
+k6 exits 0 even when every request fails (seen with a closed port: 4,078 requests, all failed,
+exit 0), so its exit status is not a verdict. `workload.Evaluate` passes a run only if it made at
+least one request and its failure rate is at most the allowed maximum (default 0). The CLI exits
+`0` passed, `1` failed, `2` invalid flags, `3` the run could not complete.
+
+### Testing
+
+No test needs k6, Docker, or a network. The k6 package's tests run the test binary itself as a
+fake k6 (`TestMain` switches on an environment variable), which records its arguments,
+environment, script, and working directory, and then writes a summary, exits with an error, writes
+nothing, writes malformed JSON, floods output, echoes the URL, or sleeps. Tests cover argument
+construction, environment filtering, success, every error type, output bounding, credential
+redaction (user information, `api_key`, `token`, and several query parameters, in k6's real
+output format and at every possible output truncation point), a missing executable,
+cancellation, timeout, and removal of the temporary directory
+after every outcome. The parser is tested against unedited k6 v2.3.0 summaries (healthy, all
+requests failed, no requests) and 23 corrupted or invalid variants. The CLI is tested with a fake
+`workload.Runner`: flag validation, defaults, report text, exit codes, the JSON file, and that a
+failed run replaces an earlier successful results file.
+
+The real k6 v2.3.0 was also run on the development machine through the CLI (a portable copy, not
+installed): against the Inventory Service's read-only `GET /inventory/LAPTOP-001` (18,200
+requests, 0 failed, exit `0`, stock unchanged), a closed port (all failed, exit `1`), a `404` path
+(all failed, exit `1`, with `K6_SUMMARY_MODE=disabled` set to confirm the filter), a missing k6
+(exit `3`), and a listener that never answers with a 4-second timeout (k6 stopped at 4 s, exit
+`3`, no k6 process or temporary directory left).
+
+### Redaction
+
+The complete target URL exists in exactly two places: the `Spec`, and k6's `RUPTIQ_TARGET_URL`
+environment variable (never k6's command line). Everything displayed or written uses a redacted
+form:
+
+- `workload.RedactURL` replaces the user information (user name and password) and the **whole**
+  query string with `xxxxx`. Redacting the entire query, instead of a list of "sensitive"
+  parameter names, cannot miss a parameter. It is used for the CLI's progress line, the report,
+  and `Result.TargetURL`; the CLI sets the reported URL from the spec itself, not from the runner.
+- `workload.RedactText` cleans free text (k6's output, error messages): it replaces the target's
+  user information and query string verbatim and in `\"`-escaped form, then the user information
+  and query of every `http(s)://` URL in the text. The second step is needed because k6 re-prints
+  URLs: for a failed request it logs `http://alice:***@host/p?api_key=...`, hiding only the
+  password. The CLI applies it to every run error before printing it or saving it.
+
+Not covered: secrets in the URL path, and the process environment of the running k6.
+
+### Limitations
+
+Constant load from one local k6 process, GET only, one URL, no headers or bodies, no ramps. Results
+are client-side only and are not stored.
 
 ## Checkout demo: Order Service
 
@@ -119,8 +235,9 @@ order only moves forward: `created`, then `reserved`, then `paid`.
 The service has no deliberate delays, failures, or bottlenecks yet. When we add them, they will be
 explicit and configurable, and documented here.
 
-Ruptiq does not test the Order Service yet: Core has no workload runner, telemetry reader, or
-adapter. Today the service is only exercised by its own unit tests and by manual requests.
+Ruptiq does not test the Order Service yet: its endpoints that matter all change state, and the
+workload runner only sends GET requests. Core also has no telemetry reader. Today the service is
+exercised by its own unit tests, the Docker smoke test, and manual requests.
 
 Some code is duplicated between `cmd/ruptiq-api` and the demo services (port parsing, shutdown
 wiring, JSON helpers). That is deliberate: sharing it would make the targets depend on Core, or on
@@ -552,14 +669,14 @@ restart, same request `201` with a new payment ID). Durable storage is out of sc
 
 ### Verification status
 
-The Compose file was loaded and schema-validated with `compose-spec/compose-go` v2.16.2 (the
-library behind `docker compose config`), and the build step was reproduced by cross-compiling all
-three services for Linux from a copy of exactly the files the `.dockerignore` admits. The images
-have **not** been built and the environment has **not** been run with Docker yet, because Docker
-was unavailable on the development machine.
+The `docker-checkout` CI job builds the images, runs the environment, and passes the smoke test on
+GitHub Actions (first passing on the pull request that added it and on the resulting `main`
+push). Docker is not installed on the development machine, so container runs happen only in CI;
+locally, the Compose file was schema-validated with `compose-spec/compose-go` v2.16.2 and the
+build was reproduced by cross-compiling for Linux.
 
-Real container verification is delegated to CI. The `docker-checkout` job in
-`.github/workflows/ci.yml` runs on `ubuntu-latest`, in parallel with the Go job:
+The `docker-checkout` job in `.github/workflows/ci.yml` runs on `ubuntu-latest`, in parallel with
+the Go job:
 
 1. Print Docker, Compose, curl, and jq versions (fails if any is missing).
 2. `docker compose config --quiet`, then `docker compose build`.
@@ -578,6 +695,8 @@ checkout works across the three containers.
 
 - `cmd/ruptiq-api`: Ruptiq Core program entry point.
 - `internal/api`: Ruptiq Core HTTP server with `GET /healthz`.
+- `cmd/ruptiq-run`, `internal/workload`, `internal/workload/k6`: the first `WorkloadRunner`, one
+  HTTP GET workload run with k6, with a CLI report and JSON results.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -589,15 +708,15 @@ checkout works across the three containers.
   `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
-  checkout services (configuration validated, not yet run with Docker).
+  checkout services, run and smoke-tested by CI.
 
-The four Core components above, cancellation and compensation across services, persistence, and
-any adapters are not implemented.
+`TelemetryReader`, `Investigator`, `RunStore`, load ramps, cancellation and compensation across
+services, persistence, and target adapters are not implemented.
 
 ## Decisions deferred
 
 - Where each further checkout demo service lives (under `demo/checkout/`, separate from Core).
 - Whether the demo eventually gets its own Go module (it shares Core's module for now).
 - Storage technology for `RunStore`.
-- How load is generated.
+- Whether load generation stays with k6 for ramps, other request types, and distributed load.
 - The adapter mechanism for external targets.

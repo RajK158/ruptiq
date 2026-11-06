@@ -1,0 +1,77 @@
+{
+  "config": {
+    "duration": 1.0071677,
+    "execution": "local",
+    "script": "export default function () {}\r\n"
+  },
+  "metadata": {
+    "generated_at": "2026-11-06T02:54:23.0463781-08:00",
+    "k6_version": "2.3.0"
+  },
+  "results": {
+    "checks": {
+      "metrics": [],
+      "results": []
+    },
+    "metrics": [
+      {
+        "contains": "default",
+        "name": "vus",
+        "type": "gauge",
+        "values": {
+          "max": 1,
+          "min": 1,
+          "value": 1
+        }
+      },
+      {
+        "contains": "default",
+        "name": "vus_max",
+        "type": "gauge",
+        "values": {
+          "max": 1,
+          "min": 1,
+          "value": 1
+        }
+      },
+      {
+        "contains": "time",
+        "name": "iteration_duration",
+        "type": "trend",
+        "values": {
+          "avg": 0.0009088037430815024,
+          "max": 4.0112,
+          "med": 0,
+          "min": 0,
+          "p90": 0,
+          "p95": 0
+        }
+      },
+      {
+        "contains": "default",
+        "name": "iterations",
+        "type": "counter",
+        "values": {
+          "count": 207957
+        }
+      },
+      {
+        "contains": "data",
+        "name": "data_received",
+        "type": "counter",
+        "values": {
+          "count": 0
+        }
+      },
+      {
+        "contains": "data",
+        "name": "data_sent",
+        "type": "counter",
+        "values": {
+          "count": 0
+        }
+      }
+    ]
+  },
+  "version": "1.0.0"
+}

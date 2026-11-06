@@ -22,15 +22,17 @@ The first usable version is planned to cover:
 3. An investigation step that analyzes a run and reports a likely bottleneck.
 4. A separate checkout demo application used as the first test target.
 
-Items 1 to 3 do not exist yet; item 4 is in progress (see below). See
+Item 1 has started: Ruptiq can run a short HTTP GET load test with k6 and report the results, but
+does not record runs yet. Items 2 and 3 do not exist yet; item 4 is in progress (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
 
-Ruptiq Core is only a health-check server. The checkout demo has three services: the Order
-Service, the Inventory Service, and the Payment Service. The Order Service reserves stock by
-calling the Inventory Service over HTTP, then takes a simulated payment by calling the Payment
-Service over HTTP. Ruptiq cannot run load tests yet.
+Ruptiq Core has a health-check server and `ruptiq-run`, a command that runs one HTTP GET load test
+with [k6](https://k6.io) against any URL and reports what k6 measured. The checkout demo has three
+services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
+reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
+the Payment Service over HTTP.
 
 | Item | Status |
 | --- | --- |
@@ -39,22 +41,25 @@ Service over HTTP. Ruptiq cannot run load tests yet.
 | `GET /healthz` health endpoint on `ruptiq-api` | Done (automated test, and checked against a running server) |
 | `PORT` setting and server timeouts | Done (`PORT` parsing is unit tested) |
 | Graceful shutdown on Ctrl+C / SIGTERM (all three servers) | Implemented, **not yet verified** by a real Ctrl+C run |
-| CI workflow (`go test`, `go vet`, `go test -race`) | Added; the race step has **not run yet** (first run happens on Linux CI) |
+| CI workflow (`go test`, `go vet`, `go test -race`) | Done; passing on GitHub Actions (Linux), including the race detector |
 | Checkout demo: Order Service | Done (in-memory storage, see below) |
 | Checkout demo: Inventory Service | Done (in-memory stock and reservations) |
 | Checkout demo: Payment Service | Done (simulated payments, in-memory) |
 | Order-to-inventory integration (`POST /orders/{id}/reserve`) | Done (HTTP/JSON, idempotent by order ID, see below) |
 | Order-to-payment integration (`POST /orders/{id}/pay`) | Done (HTTP/JSON, simulated payments, idempotent by client key, see below) |
-| Docker Compose environment for the checkout demo (`compose.yaml`) | Added; configuration validated with the Compose specification library, **not yet run with Docker** (see below) |
-| Docker checkout integration test in CI (`scripts/checkout-smoke-test.sh`) | Added; the script passed against the services run as plain processes, the CI job has **not run yet** |
+| Docker Compose environment for the checkout demo (`compose.yaml`) | Done; built and run with Docker by CI on GitHub Actions (Docker is not installed on the development machine) |
+| Docker checkout integration test in CI (`scripts/checkout-smoke-test.sh`) | Done; passing on GitHub Actions against the three containers |
+| Load test runner (`ruptiq-run`, k6 adapter) | Done for one HTTP GET workload; unit tested with a fake k6, and run against the real k6 v2.3.0 (see below) |
 | Cancellation, compensation, reservation release | Not started |
-| Workload running, telemetry, investigation, run storage | Not started |
+| Telemetry, investigation, run storage, load ramps | Not started |
 
 ## Requirements
 
 - Go 1.27 or newer (see the `go` line in `go.mod`).
 - Optional, for the containerized checkout demo: Docker with the Compose plugin (Docker Desktop
   on Windows or macOS, or Docker Engine with `docker compose` on Linux).
+- Optional, for load tests with `ruptiq-run`: [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+  (developed against v2.3.0). Ruptiq's tests do not need it.
 
 ## Run Ruptiq API locally
 
@@ -95,16 +100,145 @@ Press `Ctrl+C` to stop. The server is designed to finish in-flight requests (up 
 before exiting. This path has not been verified with a real Ctrl+C run yet and has no automated
 test.
 
+## Run a load test (`ruptiq-run`)
+
+`ruptiq-run` sends HTTP GET requests to one URL for a fixed time with a fixed number of virtual
+users, using k6 as the load generator, and reports what k6 measured. It works against any HTTP
+service; it knows nothing about the checkout demo.
+
+### Install k6
+
+k6 is a separate program; Ruptiq starts it and reads its results. Install it with one of:
+
+| Platform | Command |
+| --- | --- |
+| Windows | `winget install k6 --source winget` or `choco install k6` |
+| macOS | `brew install k6` |
+| Linux | the package for your distribution, see the [k6 install guide](https://grafana.com/docs/k6/latest/set-up/install-k6/) |
+| Any | download a release archive from [github.com/grafana/k6/releases](https://github.com/grafana/k6/releases) and unpack `k6` (`k6.exe`) anywhere |
+
+Check it with `k6 version`. If k6 is not on `PATH`, give its location with `-k6 <path>` or the
+`RUPTIQ_K6_PATH` environment variable.
+
+### Example: the Inventory Service
+
+`GET /inventory/{sku}` only reads stock, so load-testing it changes nothing. Start the Inventory
+Service (`go run ./demo/checkout/inventory-service`, or `docker compose up -d`), then:
+
+```powershell
+go run ./cmd/ruptiq-run -url http://localhost:8082/inventory/LAPTOP-001
+go run ./cmd/ruptiq-run -url http://localhost:8082/inventory/LAPTOP-001 -vus 5 -duration 10s -out run.json
+go run ./cmd/ruptiq-run -url http://localhost:8082/healthz -k6 "C:\tools\k6\k6.exe"
+```
+
+Only point `ruptiq-run` at endpoints that are safe to call thousands of times: it sends GET
+requests as fast as the target answers, and nothing stops you from aiming it at a URL that changes
+data. Do not run it against systems you do not own.
+
+A real run against the Inventory Service on the development machine (k6 v2.3.0, Windows, service
+run as a plain process, defaults of 2 virtual users for 5 seconds):
+
+```
+Running 2 virtual users for 5s against http://127.0.0.1:8082/inventory/LAPTOP-001 (timeout 1m5s)...
+
+Ruptiq load test report (k6 v2.3.0)
+  Target:            http://127.0.0.1:8082/inventory/LAPTOP-001
+  Load:              2 virtual users, 5s configured, 5.00s measured
+  HTTP requests:     18200 (3639.2 per second)
+  Failed requests:   0 (0.00%)
+  Latency (ms):      avg 0.458   p50 0.530   p95 0.744
+                     min 0.000   p90 0.637   max 78.091
+  Result:            PASSED (failure rate at most 0.00%)
+```
+
+Stock read afterwards was unchanged (`available 10, reserved 0`). These numbers describe that one
+machine at that moment; they are not a benchmark.
+
+### Options
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-url` | (required) | Target URL. Must be absolute `http` or `https`, at most 2048 characters, with no fragment, spaces, or control characters. |
+| `-vus` | `2` | Concurrent virtual users, 1 to 1000. Each one sends a request, waits for the answer, and repeats. |
+| `-duration` | `5s` | How long to apply load: whole seconds from `1s` to `1h`. |
+| `-timeout` | duration + 60s | Hard limit for the whole run. k6 is stopped when it expires. Must be longer than `-duration`. |
+| `-k6` | `RUPTIQ_K6_PATH`, else `k6` | The k6 executable, by name (looked up on `PATH`) or path. |
+| `-out` | (none) | Also write the results as JSON to this file. |
+| `-max-failure-rate` | `0` | Highest share of failed requests (0 to 1) for the run to pass. |
+
+All flags are checked before k6 starts. Ctrl+C stops k6 and the run.
+
+### What the numbers mean
+
+All values come from k6's own summary of the run; Ruptiq computes only requests per second.
+
+- **HTTP requests**: every request k6 sent, including failed ones.
+- **Failed requests / failure rate**: requests that got no response (connection refused, DNS
+  failure, the 10-second per-request timeout) or a status outside `200`-`399`, as a count and a
+  share of all requests.
+- **Requests per second**: HTTP requests divided by the measured duration.
+- **Measured duration**: how long k6 reports the run took; slightly longer than configured,
+  because in-flight requests finish after the configured time.
+- **Latency (ms)**: the time from sending a request to receiving the whole response, in
+  milliseconds, over all requests (failed requests included, often as `0`). `p50` is the median;
+  `p95` means 95% of requests were at least this fast. A `min` of `0.000` comes from requests
+  that failed without a response, or, as in the run above (no failures), from very fast local
+  requests that k6 timed as 0 ms on Windows.
+
+### Pass, fail, and exit status
+
+k6 itself reports success even when every request fails, so Ruptiq judges the run: it **passes**
+only if it made at least one request and its failure rate is at most `-max-failure-rate`.
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | The run completed and passed. |
+| `1` | The run completed but failed (for example the target refused every connection). The report lists why. |
+| `2` | Invalid flags; k6 was not started. |
+| `3` | The run could not be completed: k6 missing, k6 failed (for example exit status `107`), the timeout expired, or k6's results were missing or unreadable. No metrics are reported. |
+
+With `-out`, the file is written for every run that started, so an old successful result is never
+left behind after a failure. It contains `schema_version`, `run` (the settings, start and finish
+times, and the metrics above, using the same names), and `verdict`; or `error` and a failed
+`verdict` if the run could not complete.
+
+### Safety
+
+- k6 is started directly, without a shell. The target URL is passed to k6 in an environment
+  variable, not on its command line, so it does not appear in process listings.
+- The k6 script is a fixed file built into Ruptiq (`internal/workload/k6/scripts/http_get.js`). It
+  is written to a fresh temporary directory for each run and deleted afterwards, with k6's summary
+  file.
+- The target URL is shown and saved with its user name and password, and its **whole query
+  string**, each replaced by `xxxxx`: `https://alice:pw@example.com/p?api_key=K&page=2` appears as
+  `https://xxxxx@example.com/p?xxxxx`. This applies to everything Ruptiq prints or writes,
+  including k6's own output in error messages. k6 itself still requests the complete original URL.
+- Inherited `K6_*` environment variables are ignored, so settings such as `K6_VUS` cannot change a
+  run behind Ruptiq's back.
+- Only the last 4 KiB of k6's output is kept, for error messages, starting at a whole line.
+
+### Limitations
+
+- One workload only: GET requests to one URL at a constant number of virtual users. No ramps, no
+  other methods or request bodies, no custom headers, no think time between requests.
+- Results are client-side only (what k6 saw). There is no telemetry from the target, no
+  investigation, and no run history.
+- One k6 process on the local machine; no distributed load generation.
+- Because the whole query string is hidden, reports cannot tell apart runs that differ only in
+  their query. Secrets in the URL path itself (for example `/api/<token>/items`) are not
+  recognized and are shown as given.
+- The complete URL is in k6's environment while it runs, readable by the same user (and
+  administrators) through process inspection tools.
+- The JSON results format may still change (`schema_version` will be raised when it does).
+
 ## Checkout demo with Docker Compose
 
 `compose.yaml` at the repository root runs the three checkout services together with one
 command. Ruptiq Core is not part of it.
 
-> **Status:** the configuration was checked with the Compose specification library (the parser
-> Docker Compose uses), and the image build steps were reproduced with `go build` for Linux. It
-> has **not yet been run with Docker** on the development machine, because Docker is not
-> installed there. The CI job `Docker checkout integration` (see below) is set up to build and
-> run it on GitHub's Ubuntu runners; it has not run yet.
+> **Status:** the CI job `Docker checkout integration` builds the images, starts the environment,
+> waits for every service to be healthy, and runs the smoke test below on GitHub's Ubuntu runners;
+> it passes. Docker is not installed on the development machine, so it has not been run there.
 
 ### Automated smoke test
 
@@ -922,8 +1056,11 @@ go test -race ./...
 `gofmt -l .` prints the names of files that are not formatted. No output means everything is
 formatted.
 
+None of the tests need k6, Docker, or network access: the k6 adapter is tested against a fake k6
+program (the test binary itself) and saved k6 summaries.
+
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
-GitHub Actions workflow runs it on Linux. The development machine (Windows) has only a 32-bit
+GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
 MinGW compiler, so the race detector cannot run there; run the plain `go test ./...` locally. The
 concurrency tests, including 200 simultaneous reservation attempts for 10 units, 200
 simultaneous payment attempts for one order, and 100 simultaneous `POST /orders/{id}/pay` calls
@@ -937,7 +1074,10 @@ The Go module path is `github.com/RajK158/ruptiq`, matching the GitHub repositor
 
 ```
 cmd/ruptiq-api/                          Ruptiq Core: program entry point
+cmd/ruptiq-run/                          Ruptiq Core: load test command (flags, report, JSON results)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
+internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
+  k6/                                      runs workloads with the k6 program; embedded k6 script
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
