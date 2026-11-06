@@ -1,0 +1,108 @@
+{
+  "config": {
+    "duration": 2.0003929,
+    "execution": "local",
+    "script": "import http from 'k6/http';\nexport default function () { http.get(__ENV.TARGET_URL); }\r\n"
+  },
+  "metadata": {
+    "generated_at": "2026-11-06T02:50:20.8271874-08:00",
+    "k6_version": "2.3.0"
+  },
+  "results": {
+    "checks": {
+      "metrics": [],
+      "results": []
+    },
+    "metrics": [
+      {
+        "contains": "default",
+        "name": "http_req_failed",
+        "type": "rate",
+        "values": {
+          "matches": 4078,
+          "rate": 1,
+          "total": 4078
+        }
+      },
+      {
+        "contains": "time",
+        "name": "http_req_duration",
+        "type": "trend",
+        "values": {
+          "avg": 0,
+          "max": 0,
+          "med": 0,
+          "min": 0,
+          "p90": 0,
+          "p95": 0
+        }
+      },
+      {
+        "contains": "default",
+        "name": "http_reqs",
+        "type": "counter",
+        "values": {
+          "count": 4078
+        }
+      },
+      {
+        "contains": "time",
+        "name": "iteration_duration",
+        "type": "trend",
+        "values": {
+          "avg": 0.47579119666503206,
+          "max": 61.7324,
+          "med": 0,
+          "min": 0,
+          "p90": 1.20656,
+          "p95": 1.4663349999999982
+        }
+      },
+      {
+        "contains": "default",
+        "name": "iterations",
+        "type": "counter",
+        "values": {
+          "count": 4078
+        }
+      },
+      {
+        "contains": "default",
+        "name": "vus",
+        "type": "gauge",
+        "values": {
+          "max": 1,
+          "min": 1,
+          "value": 1
+        }
+      },
+      {
+        "contains": "default",
+        "name": "vus_max",
+        "type": "gauge",
+        "values": {
+          "max": 1,
+          "min": 1,
+          "value": 1
+        }
+      },
+      {
+        "contains": "data",
+        "name": "data_sent",
+        "type": "counter",
+        "values": {
+          "count": 0
+        }
+      },
+      {
+        "contains": "data",
+        "name": "data_received",
+        "type": "counter",
+        "values": {
+          "count": 0
+        }
+      }
+    ]
+  },
+  "version": "1.0.0"
+}
