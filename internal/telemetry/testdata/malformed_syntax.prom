@@ -1,0 +1,2 @@
+# TYPE app_requests_total counter
+app_requests_total{method="GET" 12

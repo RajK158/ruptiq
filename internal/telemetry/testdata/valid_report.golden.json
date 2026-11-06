@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "endpoint": "http://127.0.0.1:8082/metrics",
+  "snapshot": {
+    "endpoint": "http://127.0.0.1:8082/metrics",
+    "scraped_at": "2026-11-06T12:00:00.125Z",
+    "scrape_duration_seconds": 0.0021,
+    "families": [
+      {
+        "name": "app_build_info",
+        "type": "untyped",
+        "series": [
+          {
+            "labels": {
+              "version": "1.2.3"
+            },
+            "value": 1,
+            "timestamp": "2025-11-06T12:00:00Z"
+          }
+        ]
+      },
+      {
+        "name": "app_gc_pause_seconds",
+        "help": "Pause times.",
+        "type": "summary",
+        "series": [
+          {
+            "summary": {
+              "count": 400,
+              "sum": 0.25,
+              "quantiles": [
+                {
+                  "quantile": 0.5,
+                  "value": 0.0002
+                },
+                {
+                  "quantile": 0.99,
+                  "value": 0.004
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "app_queue_depth",
+        "help": "Jobs waiting.",
+        "type": "gauge",
+        "series": [
+          {
+            "value": 7.5
+          }
+        ]
+      },
+      {
+        "name": "app_ratio",
+        "help": "A gauge that is not a number.",
+        "type": "gauge",
+        "series": [
+          {
+            "value": "NaN"
+          }
+        ]
+      },
+      {
+        "name": "app_request_duration_seconds",
+        "help": "Request latency.",
+        "type": "histogram",
+        "series": [
+          {
+            "labels": {
+              "route": "/items"
+            },
+            "histogram": {
+              "count": 3,
+              "sum": 0.0625,
+              "buckets": [
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 2
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 3
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 3
+                }
+              ]
+            }
+          },
+          {
+            "labels": {
+              "route": "/items/{id}"
+            },
+            "histogram": {
+              "count": 1027,
+              "sum": 1.5,
+              "buckets": [
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 600
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 1000
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 1027
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 1027
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "app_requests_total",
+        "help": "Requests handled.",
+        "type": "counter",
+        "series": [
+          {
+            "labels": {
+              "method": "GET",
+              "route": "/items/{id}",
+              "status": "200"
+            },
+            "value": 1027
+          },
+          {
+            "labels": {
+              "method": "GET",
+              "route": "/items/{id}",
+              "status": "404"
+            },
+            "value": 0
+          },
+          {
+            "labels": {
+              "method": "POST",
+              "route": "/items",
+              "status": "201"
+            },
+            "value": 3
+          }
+        ]
+      },
+      {
+        "name": "app_temperature_celsius",
+        "help": "A gauge with a negative value and escaped labels.",
+        "type": "gauge",
+        "series": [
+          {
+            "labels": {
+              "path": "C:\\data\nline2",
+              "room": "cold \"store\""
+            },
+            "value": -3.25
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+Endpoint:    http://127.0.0.1:8082/metrics
+Scraped at:  2026-11-06T12:00:00.125Z (took 2.1 ms)
+Contents:    7 families, 10 series (1 counter, 3 gauge, 1 histogram, 1 summary, 1 untyped)
+
+app_build_info  untyped, 1 series
+  {version="1.2.3"}  1
+
+app_gc_pause_seconds  summary, 1 series
+  (no labels)  count 400, sum 0.25, 2 quantiles
+
+app_queue_depth  gauge, 1 series
+  (no labels)  7.5
+
+app_ratio  gauge, 1 series
+  (no labels)  NaN
+
+app_request_duration_seconds  histogram, 2 series
+  {route="/items"}  count 3, sum 0.0625, 4 buckets
+  {route="/items/{id}"}  count 1027, sum 1.5, 4 buckets
+
+app_requests_total  counter, 3 series
+  {method="GET",route="/items/{id}",status="200"}  1027
+  {method="GET",route="/items/{id}",status="404"}  0
+  {method="POST",route="/items",status="201"}  3
+
+app_temperature_celsius  gauge, 1 series
+  {path="C:\\data\nline2",room="cold \"store\""}  -3.25
