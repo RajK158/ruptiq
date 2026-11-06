@@ -19,6 +19,7 @@ import (
 	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/httpapi"
 	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/inventoryclient"
 	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/order"
+	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/paymentclient"
 )
 
 const (
@@ -45,7 +46,12 @@ func run() error {
 		return err
 	}
 
-	srv := httpapi.NewServer(":"+port, order.NewStore(), inventory)
+	payments, err := paymentClientFromEnv(os.Getenv("PAYMENT_SERVICE_URL"))
+	if err != nil {
+		return err
+	}
+
+	srv := httpapi.NewServer(":"+port, order.NewStore(), inventory, payments)
 
 	// ctx is cancelled when the process receives Ctrl+C (SIGINT) or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -54,7 +60,8 @@ func run() error {
 	// Run the server in a goroutine so this function can wait for a signal.
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("order-service listening", "addr", srv.Addr, "inventory_service_url", inventory.BaseURL())
+		slog.Info("order-service listening", "addr", srv.Addr,
+			"inventory_service_url", inventory.BaseURL(), "payment_service_url", payments.BaseURL())
 		serveErr <- srv.ListenAndServe()
 	}()
 
@@ -90,6 +97,19 @@ func inventoryClientFromEnv(value string) (*inventoryclient.Client, error) {
 	c, err := inventoryclient.New(value, inventoryclient.DefaultTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("invalid INVENTORY_SERVICE_URL: %w", err)
+	}
+	return c, nil
+}
+
+// paymentClientFromEnv builds the Payment Service client from value, or from
+// the default URL when value is empty. An invalid URL stops startup.
+func paymentClientFromEnv(value string) (*paymentclient.Client, error) {
+	if value == "" {
+		value = paymentclient.DefaultBaseURL
+	}
+	c, err := paymentclient.New(value, paymentclient.DefaultTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT_SERVICE_URL: %w", err)
 	}
 	return c, nil
 }

@@ -28,9 +28,9 @@ Items 1 to 3 do not exist yet; item 4 is in progress (see below). See
 ## Current implementation status
 
 Ruptiq Core is only a health-check server. The checkout demo has three services: the Order
-Service, the Inventory Service, and the Payment Service. The Order Service can reserve stock by
-calling the Inventory Service over HTTP; nothing calls the Payment Service yet. Ruptiq cannot run
-load tests yet.
+Service, the Inventory Service, and the Payment Service. The Order Service reserves stock by
+calling the Inventory Service over HTTP, then takes a simulated payment by calling the Payment
+Service over HTTP. Ruptiq cannot run load tests yet.
 
 | Item | Status |
 | --- | --- |
@@ -42,9 +42,10 @@ load tests yet.
 | CI workflow (`go test`, `go vet`, `go test -race`) | Added; the race step has **not run yet** (first run happens on Linux CI) |
 | Checkout demo: Order Service | Done (in-memory storage, see below) |
 | Checkout demo: Inventory Service | Done (in-memory stock and reservations) |
-| Checkout demo: Payment Service | Done (simulated payments, in-memory, not yet called by the Order Service) |
+| Checkout demo: Payment Service | Done (simulated payments, in-memory) |
 | Order-to-inventory integration (`POST /orders/{id}/reserve`) | Done (HTTP/JSON, idempotent by order ID, see below) |
-| Order-to-payment integration | Not started |
+| Order-to-payment integration (`POST /orders/{id}/pay`) | Done (HTTP/JSON, simulated payments, idempotent by client key, see below) |
+| Cancellation, compensation, reservation release | Not started |
 | Workload running, telemetry, investigation, run storage | Not started |
 
 ## Requirements
@@ -96,19 +97,21 @@ The Order Service is the first piece of the checkout demo application. It is the
 test** that Ruptiq will eventually load test. It is **not** part of Ruptiq Core: it lives in
 `demo/checkout/order-service/`, never imports Ruptiq Core packages, and is started separately.
 
-**What it does:** it creates orders, returns them by ID, and reserves stock for an order by calling
-the Inventory Service over HTTP. Orders are stored **in memory only** and are lost when the service
-stops.
+**What it does:** it creates orders, returns them by ID, reserves stock for an order by calling the
+Inventory Service over HTTP, and pays for a reserved order by calling the Payment Service over HTTP.
+Orders are stored **in memory only** and are lost when the service stops.
 
-**What it does not do:** payment integration is **not implemented**. An order has one of two
-statuses:
+An order moves forward only, through three statuses:
 
 - `created`: only the order record exists. No stock is held.
 - `reserved`: the Inventory Service confirmed a stock reservation, recorded in `reservation_id`.
-  This is **not** a paid or completed order. Nothing takes payment, finalizes the order, or
-  releases the reservation yet.
+  No payment is approved yet (a declined attempt leaves the order here).
+- `paid`: the Payment Service approved a payment, recorded in `payment_id` with the
+  `payment_idempotency_key` that produced it. A paid order never goes back to `reserved`.
 
-The service also has no authentication, no database, and no deliberate slowness or failures yet.
+**What it does not do:** payments are **simulated** (no card data, no real money). There is no
+shipping, cancellation, refund, or reservation release. The service also has no authentication,
+no database, and no deliberate slowness or failures yet.
 
 ### Endpoints
 
@@ -118,6 +121,7 @@ The service also has no authentication, no database, and no deliberate slowness 
 | `POST /orders` | `201` | Create an order from `{"sku": "...", "quantity": 1-10}` |
 | `GET /orders/{id}` | `200` | Fetch an order by ID |
 | `POST /orders/{id}/reserve` | `200` | Reserve the order's stock in the Inventory Service (no request body) |
+| `POST /orders/{id}/pay` | `200` | Pay for a reserved order through the Payment Service (simulated) |
 
 Rules for `POST /orders`:
 
@@ -162,14 +166,82 @@ in the Inventory Service is unknown: it may or may not have reserved stock. **Re
 call is safe**: the Inventory Service recognizes the order ID and returns the existing reservation
 instead of reserving twice. The Order Service never retries on its own.
 
+### Paying for an order: `POST /orders/{id}/pay`
+
+Request body (nothing else is accepted; unknown fields such as `amount_cents` or `card_number`
+are rejected with `400`):
+
+```json
+{"payment_method":"test_approve","idempotency_key":"checkout-1"}
+```
+
+- `payment_method` is a **test switch**, not a payment instrument: `test_approve` or
+  `test_decline`.
+- `idempotency_key` identifies one payment attempt for this order: required, at most 64
+  bytes (UTF-8), no control characters, surrounding whitespace trimmed. The key sent upstream,
+  `<order id>:<key>`, is also checked against the Payment Service's 128-byte limit before any call
+  (`422` if over). Use a new key for a new
+  attempt and the **same key to retry** an attempt whose outcome you did not get.
+
+The **amount is computed by the Order Service**, never taken from the client: quantity times the
+unit price from a fixed **test-only price catalog**, in USD integer cents (overflow is checked).
+
+| SKU | Unit price |
+| --- | --- |
+| `LAPTOP-001` | 129999 cents ($1,299.99) |
+| `PHONE-7` | 79999 cents ($799.99) |
+| `HEADPHONES-01` | 14999 cents ($149.99) |
+
+The Order Service sends `order_id`, `amount_cents`, `currency` (`USD`), `payment_method`, and the
+idempotency key **scoped to the order** (`<order id>:<your key>`, because the Payment Service's
+keys are global) to the Payment Service's `POST /payments`. Both approvals and declines return
+`200` with the order and the payment:
+
+```json
+{"order":{"id":"ord_FKUIXEYPM6BP5TXASNVRGY7BS6","sku":"LAPTOP-001","quantity":2,"status":"paid","reservation_id":"res_YBIE5C6GH37LQDAK5OIS5THMEK","payment_id":"pay_36SVTA54SBK2Y6NVLMRRE7NGU4","payment_idempotency_key":"checkout-1","created_at":"2026-11-06T09:10:59.8865341Z"},"payment":{"id":"pay_36SVTA54SBK2Y6NVLMRRE7NGU4","status":"approved","amount_cents":259998,"currency":"USD"}}
+```
+
+- **Approved**: the order moves from `reserved` to `paid` with `payment_id` and
+  `payment_idempotency_key`.
+- **Declined**: `payment.status` is `declined` and the order **stays `reserved`** (stock is still
+  held). A decline is a normal outcome, not an error. Try again with a **new** key; repeating the
+  declined key replays the decline.
+- **Already paid**: answered by the Order Service without calling the Payment Service. The same
+  key and `test_approve` returns the recorded approval again (a safe replay); any other key is
+  `409 order is already paid`; the same key with `test_decline` is `409`. A paid order can never be
+  paid twice.
+
+| Status | When |
+| --- | --- |
+| `200` | Approved, declined, or a replay of the order's recorded approval |
+| `400` / `413` | Malformed, empty, unknown-field, or oversized body |
+| `404` | Order not found |
+| `409` | Order not reserved yet; already paid (other key); key reused with another `payment_method`; or the Payment Service already holds an approval for this order that is not recorded here (see below) |
+| `422` | Missing or invalid `payment_method` or `idempotency_key`; or the SKU has no catalog price |
+| `502` | The Payment Service answered with something unexpected (malformed, or not matching the order, amount, currency, or requested outcome) |
+| `503` | The Payment Service could not be reached or failed (5xx), or is not configured |
+| `504` | The Payment Service did not answer within 5 seconds |
+
+**On every error the order is left unchanged.** For `502`, `503`, and `504` the payment outcome is
+unknown: the Payment Service may have approved it. **Retry with the same `idempotency_key`**: the
+Payment Service replays the recorded result, and an approval is then recorded on the order. The
+Order Service never retries on its own and never invents a new key.
+
+**Recovering a lost approval.** If an approval was recorded by the Payment Service but its answer
+never reached the Order Service, and the client then tries a **different** key, the Payment Service
+refuses a second approval and the Order Service returns `409` asking to retry with the key that
+produced the approval. The Payment Service cannot be searched by order, so the Order Service cannot
+find that payment by itself; the order stays `reserved` until the original key is retried.
+
 ### Start it
 
 The service listens on port `8081` by default. Set `ORDER_SERVICE_PORT` to change it.
 
-It finds the Inventory Service through `INVENTORY_SERVICE_URL` (default `http://localhost:8082`).
-The value must be an absolute `http` or `https` URL with no path, query, or credentials; an
-invalid value stops the service at startup. The Order Service starts even if the Inventory Service
-is not running; only reserve calls fail (`503`) until it is reachable.
+It finds the Inventory Service through `INVENTORY_SERVICE_URL` (default `http://localhost:8082`)
+and the Payment Service through `PAYMENT_SERVICE_URL` (default `http://localhost:8083`). Each value
+must be an absolute `http` or `https` URL with no path, query, or credentials; an invalid value
+stops the service at startup. The Order Service starts even if the other services are not running;
+only reserve or pay calls fail (`503`) until they are reachable.
 
 PowerShell:
 
@@ -284,6 +356,59 @@ try {
 }
 ```
 
+### Run all three services together (PowerShell)
+
+Use four terminals, all in the repository root. Terminals 1 and 2 are the Inventory Service and the
+Payment Service:
+
+```powershell
+go run ./demo/checkout/inventory-service      # terminal 1, port 8082
+```
+
+```powershell
+go run ./demo/checkout/payment-service        # terminal 2, port 8083
+```
+
+Terminal 3, the Order Service (both URLs are the defaults, shown for clarity):
+
+```powershell
+$env:INVENTORY_SERVICE_URL = "http://localhost:8082"
+$env:PAYMENT_SERVICE_URL = "http://localhost:8083"
+go run ./demo/checkout/order-service
+```
+
+Terminal 4, approve a payment, then repeat it:
+
+```powershell
+$order = Invoke-RestMethod -Method Post -Uri http://localhost:8081/orders -ContentType "application/json" -Body '{"sku":"LAPTOP-001","quantity":2}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($order.id)/reserve"   # status reserved
+
+$approve = '{"payment_method":"test_approve","idempotency_key":"checkout-1"}'
+$r = Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($order.id)/pay" -ContentType "application/json" -Body $approve
+$r.order.status       # paid
+$r.payment            # approved, amount_cents 259998, USD
+
+# Same key again: the same payment comes back and no new payment is created.
+(Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($order.id)/pay" -ContentType "application/json" -Body $approve).payment.id
+
+# The Payment Service holds the same payment.
+Invoke-RestMethod "http://localhost:8083/payments/$($r.payment.id)"
+```
+
+Decline, then approve with a new key:
+
+```powershell
+$phone = Invoke-RestMethod -Method Post -Uri http://localhost:8081/orders -ContentType "application/json" -Body '{"sku":"PHONE-7","quantity":1}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($phone.id)/reserve"
+
+$d = Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($phone.id)/pay" -ContentType "application/json" -Body '{"payment_method":"test_decline","idempotency_key":"try-1"}'
+$d.payment.status     # declined
+$d.order.status       # reserved
+
+$a = Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($phone.id)/pay" -ContentType "application/json" -Body '{"payment_method":"test_approve","idempotency_key":"try-2"}'
+$a.order.status       # paid
+```
+
 ### Integration limitations
 
 - **Restarts lose state on either side.** Both services keep everything in memory. If the
@@ -300,6 +425,23 @@ try {
   "unknown sku" from other `404`s, by the documented message.
 - One fixed 5-second timeout, no automatic retries, no circuit breaker, and no service discovery
   beyond a single URL.
+
+Payment-specific limitations:
+
+- **A lost approval needs the original key to recover.** If the Payment Service approved an order
+  but the answer was lost, the order stays `reserved` until the client retries with that key. A
+  different key gets `409`, and no second approval happens. The Payment Service has no lookup by
+  order, so the Order Service cannot reconcile on its own.
+- **Restarts break the payment guarantees.** If the Order Service restarts, its paid orders are
+  gone. If the Payment Service restarts, its idempotency keys and approvals are gone: a retry
+  after an ambiguous failure could then approve again, and a `reserved` order could be approved
+  twice across the restart.
+- **No cancellation or compensation.** A declined or abandoned order keeps its stock reserved.
+  Nothing refunds a payment or releases stock.
+- **Prices are a fixed test catalog** in the Order Service. Other SKUs cannot be paid (`422`), and
+  prices are not shared with the Inventory Service.
+- **Error classification depends on message text** for the Payment Service's two `409` cases, as
+  for the Inventory Service.
 
 ## Checkout demo: Inventory Service
 
@@ -621,13 +763,12 @@ Errors are JSON in the form `{"error":"message"}`:
 - One lock guards all state, so payments for different orders do not run in parallel.
 - No authentication, and no deliberate slowness or failures.
 
-### Future integration
+### Called by the Order Service
 
-Nothing calls the Payment Service yet. The planned checkout flow is: the Order Service creates an
-order, reserves stock with the Inventory Service, then asks the Payment Service to pay, using a
-stable idempotency key per checkout attempt so its own retries are safe. Only then would the order
-be finalized. Those calls, and what to do when a step fails midway (for example releasing a
-reservation after a decline), are not implemented.
+The Order Service's `POST /orders/{id}/pay` calls `POST /payments` for reserved orders, with the
+amount computed from its price catalog and the client's key scoped to the order (see the Order
+Service section). What to do when a step fails midway (for example releasing a reservation after
+a decline) is not implemented.
 
 ## Test and check
 
@@ -645,8 +786,9 @@ formatted.
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux. The development machine (Windows) has only a 32-bit
 MinGW compiler, so the race detector cannot run there; run the plain `go test ./...` locally. The
-concurrency tests, including 200 simultaneous reservation attempts for 10 units and 200
-simultaneous payment attempts for one order, run without it.
+concurrency tests, including 200 simultaneous reservation attempts for 10 units, 200
+simultaneous payment attempts for one order, and 100 simultaneous `POST /orders/{id}/pay` calls
+for one order (distinct keys and identical keys), run without it.
 
 ## Module path
 
@@ -661,8 +803,10 @@ demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Se
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
   internal/order/                          order model, validation, ID generation, in-memory store,
-                                           reservation use case and the inventory interface it needs
+                                           reservation and payment use cases, test price catalog,
+                                           and the inventory and payment interfaces they need
   internal/inventoryclient/                HTTP/JSON client for the Inventory Service
+  internal/paymentclient/                  HTTP/JSON client for the Payment Service
 demo/checkout/inventory-service/         Demo target (NOT Ruptiq Core): Inventory Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging

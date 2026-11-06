@@ -30,6 +30,22 @@ func TestPortFromEnv(t *testing.T) {
 	}
 }
 
+func TestPaymentClientFromEnv(t *testing.T) {
+	c, err := paymentClientFromEnv("")
+	if err != nil || c.BaseURL() != "http://localhost:8083" {
+		t.Errorf("default: %v, %v", c, err)
+	}
+	c, err = paymentClientFromEnv("http://payments:9000/")
+	if err != nil || c.BaseURL() != "http://payments:9000" {
+		t.Errorf("custom: %v, %v", c, err)
+	}
+	for _, bad := range []string{"payments:9000", "ftp://payments", "http://payments/api"} {
+		if _, err := paymentClientFromEnv(bad); err == nil {
+			t.Errorf("paymentClientFromEnv(%q): want error", bad)
+		}
+	}
+}
+
 func TestInventoryClientFromEnv(t *testing.T) {
 	tests := []struct {
 		name    string
