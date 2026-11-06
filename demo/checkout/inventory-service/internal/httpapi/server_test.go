@@ -241,6 +241,7 @@ func TestMethodNotAllowed(t *testing.T) {
 		{http.MethodPut, "/inventory/LAPTOP-001", "GET, HEAD"},
 		{http.MethodGet, "/reservations", "POST"},
 		{http.MethodDelete, "/reservations", "POST"},
+		{http.MethodPost, "/metrics", "GET, HEAD"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
@@ -254,7 +255,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestNotFound(t *testing.T) {
-	for _, path := range []string{"/", "/nope", "/inventory", "/inventory/", "/inventory/a/b", "/reservations/res_1"} {
+	for _, path := range []string{"/", "/nope", "/inventory", "/inventory/", "/inventory/a/b", "/reservations/res_1", "/metrics/x"} {
 		t.Run(path, func(t *testing.T) {
 			wantError(t, do(newTestHandler(), http.MethodGet, path, ""), http.StatusNotFound)
 		})

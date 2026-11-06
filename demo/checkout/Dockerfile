@@ -6,8 +6,8 @@
 #
 #   docker build -f demo/checkout/Dockerfile --build-arg SERVICE=order-service .
 #
-# The build context is the repository root (for go.mod). The root
-# .dockerignore sends only go.mod and demo/checkout/ to the builder, so Ruptiq
+# The build context is the repository root (for go.mod and go.sum). The root
+# .dockerignore sends only those and demo/checkout/ to the builder, so Ruptiq
 # Core is never part of these images.
 
 ARG GO_VERSION=1.27
@@ -16,14 +16,16 @@ ARG ALPINE_VERSION=3.24
 FROM golang:${GO_VERSION}-alpine AS build
 WORKDIR /src
 
-# The module has no third-party dependencies, so there is no go.sum to copy
-# and nothing to download.
-COPY go.mod ./
+# Download modules before copying the source, so this layer is reused until
+# go.mod or go.sum change. go.sum pins every module's checksum.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY demo/checkout/ demo/checkout/
 
 ARG SERVICE
 RUN test -n "${SERVICE}" || { echo "build arg SERVICE is required" >&2; exit 1; }
 RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
         -o /out/service "./demo/checkout/${SERVICE}"
 

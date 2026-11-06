@@ -1,8 +1,9 @@
 # Allow-list: the only Dockerfile today (demo/checkout/Dockerfile) needs just
-# go.mod and the checkout services. Everything else, including Ruptiq Core,
-# .git, and local binaries, stays out of the build context.
+# go.mod, go.sum, and the checkout services. Everything else, including Ruptiq
+# Core, .git, and local binaries, stays out of the build context.
 *
 !go.mod
+!go.sum
 !demo/checkout/
 
 # Tests and local build output are not needed in images.

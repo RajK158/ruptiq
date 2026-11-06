@@ -23,7 +23,9 @@ The first usable version is planned to cover:
 4. A separate checkout demo application used as the first test target.
 
 Item 1 has started: Ruptiq can run a short HTTP GET load test with k6, save its results as a JSON
-file, and compare two saved results, but has no run history yet. Items 2 and 3 do not exist yet; item 4 is in progress (see below). See
+file, and compare two saved results, but has no run history yet. Item 2 has started on the target
+side only: the Inventory Service exposes Prometheus metrics, but Ruptiq Core does not read them
+yet. Item 3 does not exist yet; item 4 is in progress (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
@@ -33,7 +35,7 @@ with [k6](https://k6.io) against any URL and reports what k6 measured; and `rupt
 compares two saved `ruptiq-run` results offline. The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
-the Payment Service over HTTP.
+the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
 
 | Item | Status |
 | --- | --- |
@@ -52,12 +54,18 @@ the Payment Service over HTTP.
 | Docker checkout integration test in CI (`scripts/checkout-smoke-test.sh`) | Done; passing on GitHub Actions against the three containers |
 | Load test runner (`ruptiq-run`, k6 adapter) | Done for one HTTP GET workload; unit tested with a fake k6, and run against the real k6 v2.3.0 (see below) |
 | Offline comparison of two saved runs (`ruptiq-compare`) | Done; descriptive only (no significance testing, no diagnosis); unit tested, and run on real saved k6 results (see below) |
+| Inventory Service Prometheus metrics (`GET /metrics`) | Done; unit tested and inspected on a running service. Smoke-test checks added; they first run in CI on the pull request (Docker is not installed on the development machine) |
 | Cancellation, compensation, reservation release | Not started |
-| Telemetry, investigation, run storage, load ramps | Not started |
+| Telemetry for the Order and Payment Services | Not started |
+| Telemetry collection by Ruptiq Core, investigation, run storage, load ramps | Not started |
 
 ## Requirements
 
 - Go 1.27 or newer (see the `go` line in `go.mod`).
+- Network access the first time you build or test, so Go can download the official Prometheus Go
+  client libraries (`github.com/prometheus/client_golang`, `client_model`, and `common`). Only the
+  Inventory Service uses them; Ruptiq Core still uses the standard library only. `go.sum` pins
+  every module's checksum.
 - Optional, for the containerized checkout demo: Docker with the Compose plugin (Docker Desktop
   on Windows or macOS, or Docker Engine with `docker compose` on Linux).
 - Optional, for load tests with `ruptiq-run`: [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
@@ -223,8 +231,9 @@ times, and the metrics above, using the same names), and `verdict`; or `error` a
 
 - One workload only: GET requests to one URL at a constant number of virtual users. No ramps, no
   other methods or request bodies, no custom headers, no think time between requests.
-- Results are client-side only (what k6 saw). There is no telemetry from the target, no
-  investigation, and no run history.
+- Results are client-side only (what k6 saw). Ruptiq does not read telemetry from the target
+  (the Inventory Service exposes some, but nothing collects it), and has no investigation and no
+  run history.
 - One k6 process on the local machine; no distributed load generation.
 - Because the whole query string is hidden, reports cannot tell apart runs that differ only in
   their query. Secrets in the URL path itself (for example `/api/<token>/items`) are not
@@ -391,7 +400,9 @@ docker compose down
 
 It covers a successful checkout, idempotent repeats (no second stock deduction, the same payment
 returned, no second approval with a new key), and a decline followed by an approval with a new
-key. Override `ORDER_URL`, `INVENTORY_URL`, or `PAYMENT_URL` to point it elsewhere. The CI job runs
+key. At the end it reads the Inventory Service's `/metrics` and checks that the stock gauges match
+the checkouts, that exactly two reservations were counted as created, that the stock-read count
+equals the script's own reads, and that no order, reservation, or payment ID appears. Override `ORDER_URL`, `INVENTORY_URL`, or `PAYMENT_URL` to point it elsewhere. The CI job runs
 exactly these steps on every push to `main` and every pull request.
 
 ### Prerequisites
@@ -498,8 +509,9 @@ replaced by an empty service.
   with `CGO_ENABLED=0`; the runtime stage is `alpine:3.24` with only that binary.
 - Containers run as a non-root user (UID `10001`), with a read-only root filesystem, all Linux
   capabilities dropped, and `no-new-privileges`.
-- The root `.dockerignore` is an allow-list: only `go.mod` and `demo/checkout/` (without tests) are
-  sent to the build, so Ruptiq Core and `.git` never enter these images.
+- The root `.dockerignore` is an allow-list: only `go.mod`, `go.sum`, and `demo/checkout/`
+  (without tests) are sent to the build, so Ruptiq Core and `.git` never enter these images. The
+  build downloads Go modules (the Prometheus client) in their own cached layer.
 
 ## Checkout demo: Order Service
 
@@ -884,6 +896,7 @@ Restart the service to reset stock to these values.
 | `GET /healthz` | `200` | `{"status":"ok","service":"inventory-service"}` |
 | `GET /inventory/{sku}` | `200` | `{"sku":"...","available":N,"reserved":N}` |
 | `POST /reservations` | `201` or `200` | Reserve stock: `{"order_id":"...","sku":"...","quantity":N}` |
+| `GET /metrics` | `200` | Prometheus metrics in the text exposition format (see [Metrics](#metrics-prometheus)) |
 
 Reservation behavior for `POST /reservations`:
 
@@ -990,6 +1003,98 @@ Example responses:
 {"error":"insufficient stock"}
 ```
 
+### Metrics (Prometheus)
+
+`GET /metrics` returns the service's own measurements in the Prometheus text format, produced with
+the official [Prometheus Go client](https://github.com/prometheus/client_golang). Each running
+service has its own metrics registry; nothing is global.
+
+| Metric | Type | Labels | What it measures |
+| --- | --- | --- | --- |
+| `inventory_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests the service finished handling. |
+| `inventory_http_request_duration_seconds` | histogram | `method`, `route`, `status` | How long the service took to handle each request, in seconds. |
+| `inventory_http_requests_in_flight` | gauge | none | Requests being handled right now. |
+| `inventory_stock_available_units` | gauge | `sku` | Units that can still be reserved. |
+| `inventory_stock_reserved_units` | gauge | `sku` | Units held by reservations. |
+
+The duration histogram's buckets run from 100 microseconds to 10 seconds (0.1, 0.25, 0.5, 1, 2.5,
+5, 10, 25, 50, 100, 250, and 500 ms, then 1, 2.5, 5, and 10 s), because most requests to this
+in-memory service take well under a millisecond.
+
+**Inspect it** while the service runs (directly or in Docker Compose):
+
+```powershell
+(Invoke-WebRequest http://localhost:8082/metrics -UseBasicParsing).Content
+curl.exe -s http://localhost:8082/metrics
+```
+
+An excerpt from a running service after one reservation of 2 laptops (`# HELP` and `# TYPE`
+lines, the histogram, and the counters for other requests omitted):
+
+```text
+inventory_http_requests_total{method="POST",route="/reservations",status="201"} 1
+inventory_http_requests_in_flight 0
+inventory_stock_available_units{sku="HEADPHONES-01"} 100
+inventory_stock_available_units{sku="LAPTOP-001"} 8
+inventory_stock_available_units{sku="PHONE-7"} 50
+inventory_stock_reserved_units{sku="HEADPHONES-01"} 0
+inventory_stock_reserved_units{sku="LAPTOP-001"} 2
+inventory_stock_reserved_units{sku="PHONE-7"} 0
+```
+
+**What the numbers mean:**
+
+- A request is counted, and its duration recorded, when its handler returns. The duration starts
+  when the request reaches the service's handler (after Go's HTTP server has read the request
+  headers) and includes reading the body, the stock update, and writing the response into Go's
+  buffers. It does not include network time, waiting for a connection, or the time the operating
+  system takes to send the response.
+- The stock gauges are not counters kept alongside the stock: every scrape reads the store's
+  current state under its lock, all SKUs at once, so they cannot drift out of step with
+  `GET /inventory/{sku}`. A reservation shows up completely or not at all. Idempotent replays and
+  rejected reservations do not change them.
+- Requests to `/metrics` itself are not counted, timed, or shown as in flight, so scraping does not
+  look like application traffic. They are still written to the request log.
+- All values live in memory and start again from zero (or from the seed stock) when the service
+  restarts. Prometheus treats a counter that goes back to zero as a restart.
+
+**Why the labels are bounded:** every distinct combination of label values is a separate time
+series, kept in memory by the service and by anything that stores its metrics. Labels copied from
+requests would grow without limit (one series per order or per mistyped URL) and could expose IDs
+or secrets. So:
+
+- `route` is the route template, never the request path: `/healthz`, `/inventory/{sku}`,
+  `/reservations`, or `unmatched` for any other path (including paths Go's router redirects, such
+  as `//inventory/LAPTOP-001`). `GET /inventory/ANYTHING` always counts under `/inventory/{sku}`.
+- `method` is a standard HTTP method; any other method is counted as `OTHER`.
+- `status` is a status code the service itself sends.
+- `sku` on the stock gauges comes from the catalog in the store (three SKUs), never from a request.
+  An unknown SKU in a request does not create a series.
+- Order IDs, reservation IDs, request bodies, query strings, and credentials are never used in
+  metrics.
+
+**Server-side versus k6 client-side numbers.** `ruptiq-run` reports what k6 saw from the client:
+the time from sending a request to receiving the whole response, including the network, connection
+handling, and any queueing before the service's handler starts. The service's histogram covers only
+the part inside the service. When k6's latency is much higher than the service's, the extra time is
+spent outside the handler. The counts differ too: k6 counts requests that never reached the service
+(refused connections, timeouts), and the service counts requests from every client, not just k6.
+Neither number replaces the other. On Windows, the clock behind these timings can record very fast
+requests as 0 seconds; this was seen when running the service locally.
+
+**What Ruptiq Core still needs** before it can collect and investigate this telemetry
+automatically:
+
+- A `TelemetryReader` that scrapes `/metrics` (or queries a Prometheus server) before, during, and
+  after a run, with timestamps aligned to the run.
+- A way to tell Ruptiq a target's metrics address, separately from the URL under load.
+- Turning counters and histograms into per-run rates and percentiles (differences between scrapes,
+  handling counter resets when the service restarts). Histogram percentiles are estimates bounded
+  by the bucket edges.
+- Saving telemetry with each run (`RunStore`), so that comparisons can include it.
+- An `Investigator` that relates the client-side and server-side numbers.
+- Metrics from the Order and Payment Services; today only the Inventory Service has them.
+
 ### Current limitations
 
 - All state is in memory: a restart resets stock and forgets reservations.
@@ -999,6 +1104,9 @@ Example responses:
   reservations for different SKUs do not run in parallel. Both are deliberate simplifications.
 - No authentication, no database, and no deliberate slowness or failures. It makes no outgoing
   calls; the Order Service calls its `POST /reservations` to reserve stock for orders.
+- `/metrics` is unauthenticated like every other endpoint, and shows stock levels and traffic
+  counts. Docker Compose publishes the port on `127.0.0.1` only. No Prometheus server or dashboard
+  is included.
 - The seed catalog is fixed and cannot be changed at runtime.
 
 ## Checkout demo: Payment Service
@@ -1228,7 +1336,8 @@ demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Se
   internal/paymentclient/                  HTTP/JSON client for the Payment Service
 demo/checkout/inventory-service/         Demo target (NOT Ruptiq Core): Inventory Service
   main.go                                  entry point, configuration, graceful shutdown
-  internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging
+  internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging,
+                                           Prometheus metrics
   internal/inventory/                      stock and reservation rules, seed data, in-memory store
 demo/checkout/payment-service/           Demo target (NOT Ruptiq Core): Payment Service
   main.go                                  entry point, configuration, graceful shutdown

@@ -46,17 +46,23 @@ type handler struct {
 }
 
 // NewHandler returns the HTTP handler serving all Inventory Service routes,
-// wrapped in request logging. A nil logger discards logs.
+// including Prometheus metrics at /metrics, wrapped in request logging and
+// HTTP metrics. A nil logger discards logs.
 //
 // Every route is registered twice: once with its allowed method, and once
 // without. A request using any other method falls through to the second
 // registration and gets a JSON 405 with an Allow header. (Go's default 405
 // response is plain text.) Unknown paths get a JSON 404 from the "/" route.
+//
+// Each call creates its own metrics registry, so handlers never share metrics.
+// Adding a route here means adding its template to routeLabels; until then its
+// requests are labeled "unmatched".
 func NewHandler(store *inventory.Store, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	h := &handler{store: store, logger: logger}
+	metrics, metricsHandler := newMetrics(store)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -65,8 +71,10 @@ func NewHandler(store *inventory.Store, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("/inventory/{sku}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("POST /reservations", h.createReservation)
 	mux.HandleFunc("/reservations", methodNotAllowed("POST"))
+	mux.Handle("GET "+metricsPath, metricsHandler)
+	mux.HandleFunc(metricsPath, methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/", notFound)
-	return logRequests(logger, mux)
+	return observeRequests(logger, metrics, mux)
 }
 
 // NewServer returns an http.Server for addr with conservative timeouts, so
@@ -209,28 +217,69 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// statusRecorder remembers the status code a handler wrote, for logging.
+// statusRecorder remembers the status code a handler sent, for logging and
+// metrics.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status int // 0 until a final (non-1xx) status is sent
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
+	// Like net/http, keep the first final status; later calls are no-ops there.
+	if r.status == 0 && status >= 200 {
+		r.status = status
+	}
 	r.ResponseWriter.WriteHeader(status)
 }
 
-// logRequests logs one structured line per request after it finishes.
-func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer's optional
+// features, such as flushing and deadlines.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+// statusOrOK returns the recorded status, or 200 if the handler sent nothing,
+// which is what net/http then sends.
+func (r *statusRecorder) statusOrOK() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
+}
+
+// observeRequests logs one structured line per request after it finishes and
+// records it in the HTTP metrics. Requests to the metrics endpoint are logged
+// but not measured, so they don't count as application traffic.
+func observeRequests(logger *slog.Logger, metrics *httpMetrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		measured := r.URL.Path != metricsPath
+		if measured {
+			metrics.inFlight.Inc()
+			defer metrics.inFlight.Dec()
+		}
 		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
+		elapsed := time.Since(start)
+		status := rec.statusOrOK()
+
+		if measured {
+			// ServeMux sets r.Pattern on the request it was given, so the
+			// matched route template is visible here after it returns.
+			metrics.observe(r.Method, r.Pattern, status, elapsed)
+		}
 		logger.Info("request",
 			"method", r.Method,
 			"path", r.URL.Path,
-			"status", rec.status,
-			"duration_ms", float64(time.Since(start).Microseconds())/1000,
+			"status", status,
+			"duration_ms", float64(elapsed.Microseconds())/1000,
 		)
 	})
 }
