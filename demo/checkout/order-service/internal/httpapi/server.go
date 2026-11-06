@@ -17,7 +17,7 @@ import (
 const (
 	serviceName = "order-service"
 
-	// maxBodyBytes caps POST /orders request bodies. A valid request is a few
+	// maxBodyBytes caps JSON request bodies. A valid request is a few
 	// dozen bytes, so 4 KiB is generous while still stopping abuse.
 	maxBodyBytes = 4 << 10
 )
@@ -26,6 +26,14 @@ const (
 type createOrderRequest struct {
 	SKU      string `json:"sku"`
 	Quantity int    `json:"quantity"`
+}
+
+// payOrderRequest is the JSON body accepted by POST /orders/{id}/pay. There is
+// deliberately no amount (it is computed server-side) and no card data:
+// unknown fields are rejected.
+type payOrderRequest struct {
+	PaymentMethod  string `json:"payment_method"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type healthResponse struct {
@@ -41,6 +49,7 @@ type errorResponse struct {
 type handler struct {
 	store  *order.Store
 	orders *order.Service
+	payer  *order.Payer
 }
 
 // NewHandler returns the HTTP handler serving all Order Service routes.
@@ -50,10 +59,15 @@ type handler struct {
 // registration and gets a JSON 405 with an Allow header. (Go's default 405
 // response is plain text.) Unknown paths get a JSON 404 from the "/" route.
 //
-// inventory is how the Order Service reserves stock; see order.InventoryReserver.
-// It may be nil, in which case POST /orders/{id}/reserve answers 503.
-func NewHandler(store *order.Store, inventory order.InventoryReserver) http.Handler {
-	h := &handler{store: store, orders: order.NewService(store, inventory)}
+// inventory is how the Order Service reserves stock (order.InventoryReserver),
+// and payments how it pays (order.PaymentProcessor). Either may be nil, in
+// which case the endpoint that needs it answers 503.
+func NewHandler(store *order.Store, inventory order.InventoryReserver, payments order.PaymentProcessor) http.Handler {
+	h := &handler{
+		store:  store,
+		orders: order.NewService(store, inventory),
+		payer:  order.NewPayer(store, payments),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
@@ -64,16 +78,18 @@ func NewHandler(store *order.Store, inventory order.InventoryReserver) http.Hand
 	mux.HandleFunc("/orders/{id}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("POST /orders/{id}/reserve", h.reserveOrder)
 	mux.HandleFunc("/orders/{id}/reserve", methodNotAllowed("POST"))
+	mux.HandleFunc("POST /orders/{id}/pay", h.payOrder)
+	mux.HandleFunc("/orders/{id}/pay", methodNotAllowed("POST"))
 	mux.HandleFunc("/", notFound)
 	return mux
 }
 
 // NewServer returns an http.Server for addr with conservative timeouts, so
 // slow or stalled clients cannot hold connections open forever.
-func NewServer(addr string, store *order.Store, inventory order.InventoryReserver) *http.Server {
+func NewServer(addr string, store *order.Store, inventory order.InventoryReserver, payments order.PaymentProcessor) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           NewHandler(store, inventory),
+		Handler:           NewHandler(store, inventory, payments),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -87,24 +103,8 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // createOrder handles POST /orders.
 func (h *handler) createOrder(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-
 	var req createOrderRequest
-	if err := dec.Decode(&req); err != nil {
-		writeDecodeError(w, err)
-		return
-	}
-	// Decode stops after the first JSON value. Make sure nothing follows it,
-	// such as a second object or stray text.
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if err == nil {
-			writeError(w, http.StatusBadRequest, "request body must contain a single JSON object")
-			return
-		}
-		writeDecodeError(w, err)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 
@@ -180,6 +180,89 @@ func (h *handler) reserveOrder(w http.ResponseWriter, r *http.Request) {
 		slog.Error("reserving order", "order_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
+}
+
+// payOrder handles POST /orders/{id}/pay.
+//
+// Every confirmed outcome, approved or declined, is 200 with
+// {"order": ..., "payment": ...}; check payment.status. A decline is a normal
+// business result: the order stays reserved and can be paid with a new key.
+func (h *handler) payOrder(w http.ResponseWriter, r *http.Request) {
+	var req payOrderRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	id := r.PathValue("id")
+	res, err := h.payer.Pay(r.Context(), id, req.PaymentMethod, req.IdempotencyKey)
+	if err == nil {
+		slog.Info("order payment", "order_id", res.Order.ID, "payment_id", res.Payment.ID,
+			"payment_status", res.Payment.Status, "order_status", res.Order.Status)
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+
+	const unchanged = "; the order is unchanged and the request can be retried with the same idempotency_key"
+	var verr *order.ValidationError
+	switch {
+	case errors.As(err, &verr):
+		writeError(w, http.StatusUnprocessableEntity, verr.Message)
+	case errors.Is(err, order.ErrNotFound):
+		writeError(w, http.StatusNotFound, "order not found")
+	case errors.Is(err, order.ErrNoPrice):
+		writeError(w, http.StatusUnprocessableEntity, "order sku has no price")
+	case errors.Is(err, order.ErrOrderNotReserved):
+		writeError(w, http.StatusConflict, "order inventory must be reserved before payment")
+	case errors.Is(err, order.ErrOrderAlreadyPaid):
+		writeError(w, http.StatusConflict, "order is already paid")
+	case errors.Is(err, order.ErrPaymentKeyConflict):
+		writeError(w, http.StatusConflict, "idempotency_key was already used for this order with a different payment_method")
+	case errors.Is(err, order.ErrPaymentApprovedElsewhere):
+		slog.Warn("payment service reports an approval the order service has not recorded", "order_id", id)
+		writeError(w, http.StatusConflict, "the payment service already has an approved payment for this order that is not recorded here; retry with the idempotency_key that produced it to recover it")
+	case errors.Is(err, order.ErrPaymentRecordConflict):
+		writeError(w, http.StatusConflict, "the order is already recorded as paid by a different payment")
+	case errors.Is(err, order.ErrPaymentTimeout):
+		slog.Warn("payment timed out", "order_id", id, "error", err)
+		writeError(w, http.StatusGatewayTimeout, "payment service timed out; the payment outcome is unknown"+unchanged)
+	case errors.Is(err, order.ErrPaymentNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, "payment service is not configured")
+	case errors.Is(err, order.ErrPaymentUnavailable):
+		slog.Warn("payment service unavailable", "order_id", id, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "payment service unavailable; the payment outcome is unknown"+unchanged)
+	case errors.Is(err, order.ErrPaymentBadResponse):
+		slog.Error("unexpected payment response", "order_id", id, "error", err)
+		writeError(w, http.StatusBadGateway, "unexpected response from payment service; the payment outcome is unknown"+unchanged)
+	default:
+		slog.Error("paying for order", "order_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+	}
+}
+
+// decodeJSON reads r's body into v with the service's strict rules: at most
+// maxBodyBytes, no unknown fields, exactly one JSON value. On failure it
+// writes the error response and returns false.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(v); err != nil {
+		writeDecodeError(w, err)
+		return false
+	}
+	// Decode stops after the first JSON value. Make sure nothing follows it,
+	// such as a second object or stray text.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			writeError(w, http.StatusBadRequest, "request body must contain a single JSON object")
+			return false
+		}
+		writeDecodeError(w, err)
+		return false
+	}
+	return true
 }
 
 // methodNotAllowed returns a handler that answers 405 and lists allowed methods.

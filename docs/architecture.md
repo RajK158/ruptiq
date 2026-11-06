@@ -80,15 +80,19 @@ runs over time and re-run an investigation on old data. The storage technology i
 
 The checkout demo is a small, controlled application that Ruptiq will break on purpose. It is
 planned to grow into several services (for example orders, inventory, payment). So far the Order
-Service, the Inventory Service, and the Payment Service exist; none of them calls another.
+Service, the Inventory Service, and the Payment Service exist. The Order Service calls the other
+two over HTTP; they call nothing.
 
 ```
 demo/checkout/order-service/
-  main.go            entry point: reads ORDER_SERVICE_PORT, starts the server, shuts down on signal
+  main.go            entry point: reads ORDER_SERVICE_PORT and the two service URLs, starts the
+                     server, shuts down on signal
   internal/httpapi/  HTTP layer: routes, JSON in and out, status codes, server timeouts
   internal/order/    domain layer: Order type, validation rules, ID generation, in-memory Store,
-                     reservation use case and the InventoryReserver interface
+                     reservation and payment use cases, the test price catalog, and the
+                     InventoryReserver and PaymentProcessor interfaces
   internal/inventoryclient/  HTTP client for the Inventory Service (implements InventoryReserver)
+  internal/paymentclient/    HTTP client for the Payment Service (implements PaymentProcessor)
 ```
 
 Boundaries, and how they are enforced:
@@ -101,15 +105,16 @@ Boundaries, and how they are enforced:
 - **HTTP is separate from business logic.** `httpapi` translates requests and responses; `order`
   owns what a valid order is and how orders are stored. `order` knows nothing about HTTP.
 - **Storage is separate from handlers.** Handlers call `Store.Add` and `Store.Get` (and
-  `Store.MarkReserved`, through `order.Service`). The store is an
+  `Store.MarkReserved` and `Store.MarkPaid`, through the use cases). The store is an
   in-memory map guarded by a `sync.RWMutex`. A database can replace it later without touching the
   handlers' logic.
 - **Order IDs** come from `crypto/rand` (128 random bits), not from a counter, so they are
   unguessable and do not collide across restarts.
 
 Status `created` means only that the order record exists. Status `reserved` means the Inventory
-Service confirmed a stock reservation (see "Order-to-inventory integration" below). Neither status
-means payment was taken; the Order Service does not call the Payment Service.
+Service confirmed a stock reservation (see "Order-to-inventory integration" below). Status `paid`
+means the Payment Service approved a simulated payment (see "Order-to-payment integration"). An
+order only moves forward: `created`, then `reserved`, then `paid`.
 
 The service has no deliberate delays, failures, or bottlenecks yet. When we add them, they will be
 explicit and configurable, and documented here.
@@ -272,14 +277,12 @@ and a mixed workload across several orders that checks the indexes stay consiste
 counts and relationships, not on fixed IDs or exact timestamps. CI runs them with `go test -race`
 on Linux.
 
-### Future integration
+### Called by the Order Service
 
-Nothing calls the Payment Service yet. The intended flow is: the Order Service creates an order,
-reserves stock with the Inventory Service (keyed by `order_id`; implemented, see below), then
-requests payment from the Payment Service with a stable idempotency key per checkout attempt, and
-only then finalizes the order. Failure handling across the three services (for example releasing a
+The Order Service pays for reserved orders through `POST /payments` (see "Order-to-payment
+integration" below). Failure handling across the three services (for example releasing a
 reservation after a decline, or recovering when the Order Service crashes midway) is a design
-problem for a later task; the payment call and that handling do not exist today.
+problem for a later task and does not exist today.
 
 ## Order-to-inventory integration
 
@@ -386,20 +389,139 @@ get an answer, and the response says the order is unchanged and the call can be 
 - One fixed timeout, no automatic retry, no circuit breaker or rate limiting, and a single
   configured URL.
 
+## Order-to-payment integration
+
+`POST /orders/{id}/pay` on the Order Service takes a simulated payment for a reserved order by
+calling the Payment Service's public `POST /payments` API over HTTP/JSON.
+
+```
+client ── POST /orders/{id}/pay ──────> Order Service ── POST /payments ─────────> Payment Service
+          {payment_method,                {order_id, amount_cents (computed),
+           idempotency_key}                currency USD, payment_method,
+                                           idempotency_key "<order id>:<key>"}
+        <── 200 {order, payment}  <────────────────────── 201 new / 200 replay {id, status, ...}
+```
+
+The same independence rules as for inventory apply: no Payment Service package is imported, the
+service is known only by `PAYMENT_SERVICE_URL` (default `http://localhost:8083`), and Core is
+untouched. `order.PaymentProcessor` is a one-method interface defined in `order`;
+`paymentclient.Client` implements it, and `order.Payer` is the use case.
+
+### Inputs the Order Service trusts, and those it does not
+
+- The client chooses only the **test outcome** (`test_approve`/`test_decline`) and an
+  **idempotency key** per attempt. The strict decoder rejects any other field, so no card data or
+  amount can be submitted.
+- The **amount** is always computed server-side: quantity times a unit price from a fixed
+  test-only catalog in `order/pricing.go`, in USD integer cents, with overflow and unknown-SKU
+  checks. Prices live in the Order Service because the Inventory Service has none; they are demo
+  data, not a pricing system.
+- The **upstream key** is `<order id>:<client key>`. Payment Service keys are global, so scoping
+  stops two orders that both use `attempt-1` from colliding, and stops one order's key from
+  replaying another order's payment. Order IDs contain no `:`, so the mapping is unambiguous.
+  The Payment Service limits keys to 128 bytes, so `Pay` checks the length of the whole combined
+  key, not just the client's part (at most 64 bytes), and rejects an over-long key with `422`
+  before any upstream call. With today's 30-byte order IDs the combined key is at most 95 bytes.
+
+### Payment flow and safety rules
+
+1. Validate `payment_method` and `idempotency_key` (`422`). Load the order (`404`).
+2. `created`: `409`, no upstream call. Only reserved orders can pay.
+3. Compute the amount (`422` if the SKU has no price).
+4. `paid`: answer locally, with no upstream call. The same key with `test_approve` returns the
+   recorded approval; another key is `ErrOrderAlreadyPaid` (`409`); the same key with
+   `test_decline` is a key conflict (`409`). So a paid order never produces a new payment attempt.
+5. `reserved`: call the Payment Service. **No lock is held** during this call.
+6. The client accepts only `201` or `200` whose body has an ID and matches the request's order,
+   amount, currency, and the outcome the method selects. Anything else is an error.
+7. **Declined**: return the decline with the current order (still `reserved`). It is not an error.
+8. **Approved**: `Store.MarkPaid`, a compare-and-set under the store lock that moves `reserved` to
+   `paid` and stores the payment ID and client key. It never overwrites an existing approval and
+   never moves a `paid` order back. If the order turns out to be paid by a *different* payment
+   (only possible if the Payment Service lost its state), the recorded payment is kept, the event
+   is logged, and the request fails with `409` (`ErrPaymentRecordConflict`).
+
+**Concurrency.** Concurrent requests for one order may each reach the Payment Service, which
+allows one approval per order and deduplicates identical keys, so:
+
+- distinct keys: one approval, and every other request gets `409` (answered locally once the order
+  is paid, or from the Payment Service's "order already has an approved payment");
+- identical keys: one payment; every request gets `200` with the same payment (replays).
+
+**Ambiguous failures never mark an order paid.** Timeouts, dropped connections, `5xx`, and
+malformed or mismatched responses leave the order `reserved` and return `504`, `503`, or `502`
+saying the outcome is unknown and the same key can be retried. Retrying with the same key makes the
+Payment Service replay the recorded result, which is then recorded on the order.
+
+**Unrecorded upstream approval.** If the approval's response was lost and the client then uses a
+*different* key, the Payment Service refuses a second approval (`409 order already has an approved
+payment`). The Order Service first re-reads the order: a concurrent request may just have recorded
+the approval, in which case it answers as for a paid order. Otherwise it cannot recover the
+payment itself, because the Payment Service has no lookup by order. It returns `409` stating that
+an approval exists and must be recovered by retrying with the key that produced it, and the order
+stays `reserved`. This is the documented "reconciliation cannot be done safely" case; no approval
+is invented and none is duplicated.
+
+### Payment client behavior
+
+Same hygiene as the inventory client: 5-second timeout, caller's context propagated, redirects not
+followed, at most 64 KiB read, base URL validated at startup, no automatic retries.
+
+| Payment Service outcome | Order Service error | Order Service response |
+| --- | --- | --- |
+| `201`/`200`, matching, approved | (success) | `200`, order `paid` |
+| `201`/`200`, matching, declined | (success) | `200`, order still `reserved` |
+| `409` `order already has an approved payment` | `ErrPaymentApprovedElsewhere` | `409` (or a local replay if the order is now paid) |
+| `409` `idempotency_key was already used with different payment details` | `ErrPaymentKeyConflict` | `409` |
+| Connection refused or reset, `5xx`, cancelled, truncated body | `ErrPaymentUnavailable` | `503` |
+| Timeout | `ErrPaymentTimeout` | `504` |
+| Anything else (malformed or mismatched body, other `409`, `4xx`, unexpected `2xx`) | `ErrPaymentBadResponse` | `502` |
+
+### Testing
+
+- `order`: pricing and overflow; approval, decline, decline then approval with a new key; local
+  replays and conflicts for paid orders (with no upstream call); rejections before any upstream
+  call; every failure leaving the order unchanged; recovery of an approval whose response was lost;
+  the record-conflict path; `MarkPaid` compare-and-set; 100 concurrent distinct-key and 100
+  identical-key payments (one approval each).
+- `paymentclient`: an `httptest` server checks the exact request and every response mapping,
+  including mismatched order, amount, currency, and outcome, oversized and truncated bodies,
+  redirects, timeout, caller deadline, and connection refused.
+- `httpapi`: the full handler with the real inventory and payment clients against `httptest` fakes
+  of both services (the payment fake has global keys and one approval per order). It covers
+  approval and stored state, decline then approval, identical replay without upstream traffic,
+  conflicting attempts, per-order key scoping, 100 concurrent distinct-key calls (one `200`, 99
+  `409`, one upstream approval), 100 concurrent identical-key calls (all `200`, one payment),
+  timeout, service down, not configured, a dropped connection after approval followed by a
+  rejected different key and a successful same-key recovery, malformed and mismatched responses,
+  and request validation (including `card_number` and `amount_cents` rejected).
+
+### Limitations
+
+- A lost approval is recovered only when the client retries with the original key (see above).
+- Restarts: Payment Service state is in memory, so after it restarts a retry could approve again
+  and a `reserved` order could be approved twice across the restart. Order Service restarts lose
+  paid orders.
+- No cancellation, compensation, refund, or reservation release.
+- The price catalog is fixed test data inside the Order Service.
+- The two Payment Service `409` cases are told apart by their documented messages.
+
 ## What exists today
 
 - `cmd/ruptiq-api`: Ruptiq Core program entry point.
 - `internal/api`: Ruptiq Core HTTP server with `GET /healthz`.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
-  `GET /orders/{id}`, `POST /orders/{id}/reserve`), with in-memory storage. It reserves stock by
-  calling the Inventory Service over HTTP.
+  `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
+  storage. It reserves stock by calling the Inventory Service and takes simulated payments by
+  calling the Payment Service, both over HTTP.
 - `demo/checkout/inventory-service`: the Inventory Service (`GET /healthz`,
   `GET /inventory/{sku}`, `POST /reservations`), with in-memory stock and idempotent,
   concurrency-safe reservations.
 - `demo/checkout/payment-service`: the Payment Service (`GET /healthz`, `POST /payments`,
   `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
-The four Core components above, the Order-to-Payment call, and any adapters are not implemented.
+The four Core components above, cancellation and compensation across services, and any adapters
+are not implemented.
 
 ## Decisions deferred
 

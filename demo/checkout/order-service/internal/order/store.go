@@ -56,6 +56,36 @@ func (s *Store) MarkReserved(id, reservationID string) (o Order, changed bool, e
 	return o, true, nil
 }
 
+// MarkPaid records an approved payment for a reserved order and returns the
+// stored order. changed is true only when this call moved the order from
+// reserved to paid.
+//
+// Like MarkReserved it is a compare-and-set under the store's lock: the first
+// approval recorded wins, a paid order is never changed again (its payment ID
+// and key are never overwritten), and nothing moves it backward. If the order
+// is already paid, the stored order is returned unchanged; callers compare its
+// PaymentID with their own. It returns ErrOrderNotReserved for an order that
+// is still created, and ErrNotFound if the order does not exist.
+func (s *Store) MarkPaid(id, paymentID, idempotencyKey string) (o Order, changed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[id]
+	if !ok {
+		return Order{}, false, ErrNotFound
+	}
+	switch o.Status {
+	case StatusCreated:
+		return o, false, ErrOrderNotReserved
+	case StatusPaid:
+		return o, false, nil
+	}
+	o.Status = StatusPaid
+	o.PaymentID = paymentID
+	o.PaymentIdempotencyKey = idempotencyKey
+	s.orders[id] = o
+	return o, true, nil
+}
+
 // Get returns the order with the given ID, or ErrNotFound.
 // Order contains no pointers or slices, so the returned copy is independent of
 // the stored one.

@@ -150,7 +150,7 @@ func setup(t *testing.T, inv *fakeInventoryService, timeout time.Duration) http.
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(order.NewStore(), client)
+	return NewHandler(order.NewStore(), client, nil)
 }
 
 func createOrder(t *testing.T, h http.Handler, sku string, qty int) order.Order {
@@ -356,7 +356,7 @@ func TestReserveOrderConnectionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(order.NewStore(), client)
+	h := NewHandler(order.NewStore(), client, nil)
 	o := createOrder(t, h, "LAPTOP-001", 2)
 
 	wantError(t, reserve(h, o.ID), http.StatusServiceUnavailable)
@@ -366,7 +366,7 @@ func TestReserveOrderConnectionFailure(t *testing.T) {
 }
 
 func TestReserveOrderNotConfigured(t *testing.T) {
-	h := NewHandler(order.NewStore(), nil)
+	h := NewHandler(order.NewStore(), nil, nil)
 	o := createOrder(t, h, "LAPTOP-001", 2)
 	wantError(t, reserve(h, o.ID), http.StatusServiceUnavailable)
 }
@@ -403,7 +403,7 @@ func TestReserveOrderRecoversFromAmbiguousFailure(t *testing.T) {
 }
 
 func TestReserveOrderMethodNotAllowed(t *testing.T) {
-	h := NewHandler(order.NewStore(), nil)
+	h := NewHandler(order.NewStore(), nil, nil)
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		rec := do(h, method, "/orders/ord_x/reserve", "")
 		wantError(t, rec, http.StatusMethodNotAllowed)

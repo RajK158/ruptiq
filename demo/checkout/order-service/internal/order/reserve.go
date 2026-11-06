@@ -90,7 +90,8 @@ func (s *Service) Reserve(ctx context.Context, orderID string) (Order, error) {
 	if err != nil {
 		return Order{}, err
 	}
-	if o.Status == StatusReserved {
+	if o.Status != StatusCreated {
+		// Reserved, or already further along (paid): reservation is done.
 		return o, nil
 	}
 	if s.inventory == nil {
