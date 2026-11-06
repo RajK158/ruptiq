@@ -27,9 +27,10 @@ Items 1 to 3 do not exist yet; item 4 is in progress (see below). See
 
 ## Current implementation status
 
-Ruptiq Core is only a health-check server. The checkout demo has three independent services, the
-Order Service, the Inventory Service, and the Payment Service, which do not call each other yet.
-Ruptiq cannot run load tests yet.
+Ruptiq Core is only a health-check server. The checkout demo has three services: the Order
+Service, the Inventory Service, and the Payment Service. The Order Service can reserve stock by
+calling the Inventory Service over HTTP; nothing calls the Payment Service yet. Ruptiq cannot run
+load tests yet.
 
 | Item | Status |
 | --- | --- |
@@ -40,9 +41,10 @@ Ruptiq cannot run load tests yet.
 | Graceful shutdown on Ctrl+C / SIGTERM (all three servers) | Implemented, **not yet verified** by a real Ctrl+C run |
 | CI workflow (`go test`, `go vet`, `go test -race`) | Added; the race step has **not run yet** (first run happens on Linux CI) |
 | Checkout demo: Order Service | Done (in-memory storage, see below) |
-| Checkout demo: Inventory Service | Done (in-memory stock and reservations, not yet called by the Order Service) |
+| Checkout demo: Inventory Service | Done (in-memory stock and reservations) |
 | Checkout demo: Payment Service | Done (simulated payments, in-memory, not yet called by the Order Service) |
-| Order-to-inventory and order-to-payment integration | Not started |
+| Order-to-inventory integration (`POST /orders/{id}/reserve`) | Done (HTTP/JSON, idempotent by order ID, see below) |
+| Order-to-payment integration | Not started |
 | Workload running, telemetry, investigation, run storage | Not started |
 
 ## Requirements
@@ -94,12 +96,18 @@ The Order Service is the first piece of the checkout demo application. It is the
 test** that Ruptiq will eventually load test. It is **not** part of Ruptiq Core: it lives in
 `demo/checkout/order-service/`, never imports Ruptiq Core packages, and is started separately.
 
-**What it does:** it creates orders and returns them by ID. Orders are stored **in memory only**
-and are lost when the service stops.
+**What it does:** it creates orders, returns them by ID, and reserves stock for an order by calling
+the Inventory Service over HTTP. Orders are stored **in memory only** and are lost when the service
+stops.
 
-**What it does not do:** payment and inventory integration are **not implemented**. There is no
-Payment Service integration, and the Order Service does not call the Inventory Service. An order
-with status `created` means *only* that the record was created. It does not mean stock was reserved, payment succeeded, or checkout completed.
+**What it does not do:** payment integration is **not implemented**. An order has one of two
+statuses:
+
+- `created`: only the order record exists. No stock is held.
+- `reserved`: the Inventory Service confirmed a stock reservation, recorded in `reservation_id`.
+  This is **not** a paid or completed order. Nothing takes payment, finalizes the order, or
+  releases the reservation yet.
+
 The service also has no authentication, no database, and no deliberate slowness or failures yet.
 
 ### Endpoints
@@ -109,6 +117,7 @@ The service also has no authentication, no database, and no deliberate slowness 
 | `GET /healthz` | `200` | `{"status":"ok","service":"order-service"}` |
 | `POST /orders` | `201` | Create an order from `{"sku": "...", "quantity": 1-10}` |
 | `GET /orders/{id}` | `200` | Fetch an order by ID |
+| `POST /orders/{id}/reserve` | `200` | Reserve the order's stock in the Inventory Service (no request body) |
 
 Rules for `POST /orders`:
 
@@ -127,9 +136,40 @@ Errors are JSON in the form `{"error":"message"}`:
 | `413` | Request body larger than 4096 bytes |
 | `422` | Valid JSON but invalid values (missing or blank `sku`, `quantity` outside 1 to 10) |
 
+### Reserving inventory: `POST /orders/{id}/reserve`
+
+The Order Service sends the order's `sku` and `quantity` to the Inventory Service's
+`POST /reservations`, using the **order ID as the idempotency key** (`order_id`). On confirmation
+it stores the reservation ID and sets the status to `reserved`. The updated order is returned and
+is visible through `GET /orders/{id}`.
+
+```json
+{"id":"ord_6D4ZSGUOXMTIUTGQJVMXDKX5EJ","sku":"LAPTOP-001","quantity":2,"status":"reserved","reservation_id":"res_SF5MH6IFUI54MIGH7QT2FTHZEZ","created_at":"2026-11-06T08:46:45.8032774Z"}
+```
+
+| Status | When |
+| --- | --- |
+| `200` | Reserved now, or already reserved earlier (repeating the call is safe and returns the same order) |
+| `404` | Order not found |
+| `409` | Not enough stock, or the Inventory Service already holds a different reservation for this order ID |
+| `422` | The order's SKU is unknown to the Inventory Service |
+| `502` | The Inventory Service answered with something unexpected (malformed or mismatched response) |
+| `503` | The Inventory Service could not be reached, failed (5xx), or is not configured |
+| `504` | The Inventory Service did not answer within 5 seconds |
+
+On every error the order is **left unchanged** (`created`). For `502`, `503`, and `504` the outcome
+in the Inventory Service is unknown: it may or may not have reserved stock. **Retrying the same
+call is safe**: the Inventory Service recognizes the order ID and returns the existing reservation
+instead of reserving twice. The Order Service never retries on its own.
+
 ### Start it
 
 The service listens on port `8081` by default. Set `ORDER_SERVICE_PORT` to change it.
+
+It finds the Inventory Service through `INVENTORY_SERVICE_URL` (default `http://localhost:8082`).
+The value must be an absolute `http` or `https` URL with no path, query, or credentials; an
+invalid value stops the service at startup. The Order Service starts even if the Inventory Service
+is not running; only reserve calls fail (`503`) until it is reachable.
 
 PowerShell:
 
@@ -194,6 +234,73 @@ Example order response (`id` and `created_at` differ on every request):
 {"id":"ord_2JUUQNEIZFTQOZDHSM5OSFVOCA","sku":"LAPTOP-001","quantity":2,"status":"created","created_at":"2026-11-04T23:55:39.3056743Z"}
 ```
 
+### Run Order Service and Inventory Service together (PowerShell)
+
+Use three terminals, all in the repository root.
+
+Terminal 1, the Inventory Service (port `8082`):
+
+```powershell
+go run ./demo/checkout/inventory-service
+```
+
+Terminal 2, the Order Service (port `8081`). Setting `INVENTORY_SERVICE_URL` is optional here
+because this is the default:
+
+```powershell
+$env:INVENTORY_SERVICE_URL = "http://localhost:8082"
+go run ./demo/checkout/order-service
+```
+
+Terminal 3, the walkthrough. Check stock, create an order, reserve it, and inspect both sides:
+
+```powershell
+Invoke-RestMethod http://localhost:8082/inventory/LAPTOP-001          # available 10, reserved 0
+
+$order = Invoke-RestMethod -Method Post -Uri http://localhost:8081/orders -ContentType "application/json" -Body '{"sku":"LAPTOP-001","quantity":2}'
+$order                                                                # status created
+
+Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($order.id)/reserve"   # status reserved, reservation_id set
+Invoke-RestMethod "http://localhost:8081/orders/$($order.id)"                             # same, stored
+Invoke-RestMethod http://localhost:8082/inventory/LAPTOP-001          # available 8, reserved 2
+```
+
+Reserve the same order again. It returns the same reservation and stock stays at 8:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:8081/orders/$($order.id)/reserve"
+Invoke-RestMethod http://localhost:8082/inventory/LAPTOP-001          # still available 8
+```
+
+See a failure (here: not enough stock left for 9 laptops):
+
+```powershell
+$big = Invoke-RestMethod -Method Post -Uri http://localhost:8081/orders -ContentType "application/json" -Body '{"sku":"LAPTOP-001","quantity":9}'
+try {
+    Invoke-WebRequest -Method Post -Uri "http://localhost:8081/orders/$($big.id)/reserve" -UseBasicParsing
+} catch {
+    $_.Exception.Response.StatusCode.value__   # 409
+    $_.ErrorDetails.Message                    # {"error":"insufficient stock"}
+}
+```
+
+### Integration limitations
+
+- **Restarts lose state on either side.** Both services keep everything in memory. If the
+  Inventory Service restarts, orders already marked `reserved` keep a `reservation_id` that the
+  Inventory Service no longer knows about, and its stock is back to the seed values. If the Order
+  Service restarts, its orders are gone but their reservations remain held in the Inventory Service.
+- **Reservations are never released.** A failed or abandoned checkout keeps its stock held; there
+  is no cancellation or expiry.
+- **Already-reserved orders are answered locally.** Once an order is `reserved`, repeating the
+  reserve call does not contact the Inventory Service again, so it does not detect the restart case
+  above.
+- **Error classification depends on message text.** The Inventory Service's errors have no
+  machine-readable codes, so the Order Service tells "insufficient stock" from other `409`s, and
+  "unknown sku" from other `404`s, by the documented message.
+- One fixed 5-second timeout, no automatic retries, no circuit breaker, and no service discovery
+  beyond a single URL.
+
 ## Checkout demo: Inventory Service
 
 The Inventory Service is the second piece of the checkout demo, and like the Order Service it is
@@ -204,8 +311,8 @@ never imports Ruptiq Core or the Order Service, and is started separately.
 are kept **in memory only** and are lost when the service stops.
 
 **What it does not do:** a reservation is **not a completed purchase**. There is no payment, no
-order finalization, and no way to release, expire, or confirm a reservation. The Order Service does
-not call the Inventory Service yet.
+order finalization, and no way to release, expire, or confirm a reservation. The Order Service
+calls `POST /reservations` to reserve stock for its orders (see the Order Service section).
 
 **Seed data (testing only):** the service always starts with the same small catalog. It exists so
 tests and demos begin from a known state; it is not real product data.
@@ -338,8 +445,8 @@ Example responses:
   never returned.
 - The idempotency record lives only as long as the process, and one lock guards all SKUs, so
   reservations for different SKUs do not run in parallel. Both are deliberate simplifications.
-- No authentication, no database, no deliberate slowness or failures, and no calls to or from any
-  other service.
+- No authentication, no database, and no deliberate slowness or failures. It makes no outgoing
+  calls; the Order Service calls its `POST /reservations` to reserve stock for orders.
 - The seed catalog is fixed and cannot be changed at runtime.
 
 ## Checkout demo: Payment Service
@@ -553,7 +660,9 @@ internal/api/                            Ruptiq Core: HTTP server, routes, and h
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
-  internal/order/                          order model, validation, ID generation, in-memory store
+  internal/order/                          order model, validation, ID generation, in-memory store,
+                                           reservation use case and the inventory interface it needs
+  internal/inventoryclient/                HTTP/JSON client for the Inventory Service
 demo/checkout/inventory-service/         Demo target (NOT Ruptiq Core): Inventory Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors, request logging

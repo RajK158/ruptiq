@@ -14,7 +14,7 @@ import (
 
 // newTestHandler returns a handler backed by a fresh, empty store.
 func newTestHandler() http.Handler {
-	return NewHandler(order.NewStore())
+	return NewHandler(order.NewStore(), nil)
 }
 
 // do sends one request straight to h, without opening a network port.

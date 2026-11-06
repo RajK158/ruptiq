@@ -29,3 +29,28 @@ func TestPortFromEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestInventoryClientFromEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty uses default", value: "", want: "http://localhost:8082"},
+		{name: "custom URL", value: "http://127.0.0.1:9092/", want: "http://127.0.0.1:9092"},
+		{name: "missing scheme", value: "localhost:8082", wantErr: true},
+		{name: "path not allowed", value: "http://localhost:8082/api", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := inventoryClientFromEnv(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("inventoryClientFromEnv(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
+			}
+			if err == nil && c.BaseURL() != tt.want {
+				t.Errorf("BaseURL() = %q, want %q", c.BaseURL(), tt.want)
+			}
+		})
+	}
+}

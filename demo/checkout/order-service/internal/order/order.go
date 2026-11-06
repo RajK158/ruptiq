@@ -20,17 +20,28 @@ const (
 type Status string
 
 // StatusCreated means ONLY that the order record was created. It does not mean
-// inventory was reserved, payment was taken, or checkout completed. Those
-// steps do not exist yet.
+// inventory was reserved, payment was taken, or checkout completed.
 const StatusCreated Status = "created"
 
+// StatusReserved means the Inventory Service confirmed a stock reservation for
+// this order. It does NOT mean payment was taken or checkout completed:
+// payment integration does not exist yet. Orders only ever move forward, from
+// created to reserved; nothing moves them back.
+const StatusReserved Status = "reserved"
+
 // Order is a request to buy Quantity units of SKU.
+//
+// Order must stay comparable with == (no slices, maps or pointers); tests rely
+// on it.
 type Order struct {
-	ID        string    `json:"id"`
-	SKU       string    `json:"sku"`
-	Quantity  int       `json:"quantity"`
-	Status    Status    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID       string `json:"id"`
+	SKU      string `json:"sku"`
+	Quantity int    `json:"quantity"`
+	Status   Status `json:"status"`
+	// ReservationID is the Inventory Service's reservation ID. It is set
+	// only once the order is reserved, and omitted from JSON before that.
+	ReservationID string    `json:"reservation_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ValidationError reports why an order request was rejected. Its message is
