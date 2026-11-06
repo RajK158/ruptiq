@@ -86,7 +86,9 @@ Service, the Inventory Service, and the Payment Service exist; none of them call
 demo/checkout/order-service/
   main.go            entry point: reads ORDER_SERVICE_PORT, starts the server, shuts down on signal
   internal/httpapi/  HTTP layer: routes, JSON in and out, status codes, server timeouts
-  internal/order/    domain layer: Order type, validation rules, ID generation, in-memory Store
+  internal/order/    domain layer: Order type, validation rules, ID generation, in-memory Store,
+                     reservation use case and the InventoryReserver interface
+  internal/inventoryclient/  HTTP client for the Inventory Service (implements InventoryReserver)
 ```
 
 Boundaries, and how they are enforced:
@@ -98,14 +100,16 @@ Boundaries, and how they are enforced:
   any code outside `order-service/` (including Core) from importing them.
 - **HTTP is separate from business logic.** `httpapi` translates requests and responses; `order`
   owns what a valid order is and how orders are stored. `order` knows nothing about HTTP.
-- **Storage is separate from handlers.** Handlers call `Store.Add` and `Store.Get`. The store is an
+- **Storage is separate from handlers.** Handlers call `Store.Add` and `Store.Get` (and
+  `Store.MarkReserved`, through `order.Service`). The store is an
   in-memory map guarded by a `sync.RWMutex`. A database can replace it later without touching the
   handlers' logic.
 - **Order IDs** come from `crypto/rand` (128 random bits), not from a counter, so they are
   unguessable and do not collide across restarts.
 
-Status `created` means only that the order record exists. It says nothing about inventory or
-payment. The Inventory and Payment Services exist, but the Order Service does not call them yet.
+Status `created` means only that the order record exists. Status `reserved` means the Inventory
+Service confirmed a stock reservation (see "Order-to-inventory integration" below). Neither status
+means payment was taken; the Order Service does not call the Payment Service.
 
 The service has no deliberate delays, failures, or bottlenecks yet. When we add them, they will be
 explicit and configurable, and documented here.
@@ -183,8 +187,8 @@ The service starts with a fixed, deterministic catalog (`LAPTOP-001`: 10, `PHONE
 
 A reservation means only that stock is held. There is no payment, order finalization, release,
 expiry, or confirmation yet, so reserved stock is never returned. State is in memory and lost on
-restart. There is no authentication and no deliberate delays or failures. The Order Service does
-not call the Inventory Service; that integration is a later step.
+restart. There is no authentication and no deliberate delays or failures. The Order Service calls
+`POST /reservations` over HTTP; see "Order-to-inventory integration" below.
 
 ## Checkout demo: Payment Service
 
@@ -271,26 +275,131 @@ on Linux.
 ### Future integration
 
 Nothing calls the Payment Service yet. The intended flow is: the Order Service creates an order,
-reserves stock with the Inventory Service (keyed by `order_id`), then requests payment from the
-Payment Service with a stable idempotency key per checkout attempt, and only then finalizes the
-order. Failure handling across the three services (for example releasing a reservation after a
-decline, or recovering when the Order Service crashes midway) is a design problem for a later
-task; neither the calls nor that handling exist today.
+reserves stock with the Inventory Service (keyed by `order_id`; implemented, see below), then
+requests payment from the Payment Service with a stable idempotency key per checkout attempt, and
+only then finalizes the order. Failure handling across the three services (for example releasing a
+reservation after a decline, or recovering when the Order Service crashes midway) is a design
+problem for a later task; the payment call and that handling do not exist today.
+
+## Order-to-inventory integration
+
+`POST /orders/{id}/reserve` on the Order Service reserves the order's stock by calling the
+Inventory Service's public `POST /reservations` API over HTTP/JSON. This is the first call between
+checkout services.
+
+```
+client ── POST /orders/{id}/reserve ──> Order Service ── POST /reservations ──> Inventory Service
+                                         {order_id, sku, quantity}
+        <── 200 order (status reserved, <── 201/200 reservation (id, status reserved)
+            reservation_id)
+```
+
+### Independence
+
+The services stay independently deployable: the Order Service imports no Inventory Service
+package and knows it only by URL (`INVENTORY_SERVICE_URL`, default `http://localhost:8082`). Its
+client mirrors the few JSON fields it needs. Either service can be started, stopped, or replaced
+alone. Core is untouched and still depends on nothing in `demo/`.
+
+### Layers inside the Order Service
+
+```
+internal/httpapi/          POST /orders/{id}/reserve: maps results and errors to status codes
+internal/order/            Service.Reserve: the use case, plus the InventoryReserver interface
+                           and the error values it understands. No HTTP.
+internal/inventoryclient/  Client: implements InventoryReserver with net/http and JSON
+```
+
+`order.InventoryReserver` is a one-method interface (`Reserve(ctx, req) (reservationID, error)`),
+defined in the package that uses it. Business logic depends on the interface; only `main.go`
+knows the HTTP implementation. Tests substitute fakes at both levels.
+
+### Reservation flow and safety rules
+
+1. Load the order. Missing: `404`, no upstream call.
+2. If it is already `reserved`, return it as is, with no upstream call.
+3. Call the Inventory Service with `order_id` = the order ID. **No lock is held** during this call.
+4. Only on a confirmed success (`201` or `200` with a body whose `order_id`, `sku`, `quantity`, and
+   `status` match the request), record the reservation with `Store.MarkReserved`.
+
+`MarkReserved` is a compare-and-set under the store's lock: it moves the order from `created` to
+`reserved` only if it is still `created`. So when concurrent requests for one order all finish,
+exactly one records the reservation, the others leave it alone, and nothing can move an order back
+to `created` or replace its reservation ID. Concurrent requests may each call the Inventory
+Service, but they all carry the same order ID, so the Inventory Service creates one reservation and
+returns it to all of them.
+
+**Ambiguous failures never mark an order reserved.** If the connection fails, times out, or the
+response is malformed, the Inventory Service may or may not have reserved stock, but the Order
+Service has no confirmation, so the order stays `created`. Recovery is a retry of the same call:
+because the order ID is the idempotency key, the Inventory Service returns the existing
+reservation (`200`) instead of reserving again, and the order then becomes `reserved`. The Order
+Service never retries automatically, and never generates a new key for a retry.
+
+### HTTP client behavior
+
+- `net/http` client with a 5-second overall timeout; the incoming request's context is passed
+  through, so a client disconnect or server shutdown also cancels the upstream call.
+- Redirects are not followed, the response body is always closed, and at most 64 KiB is read.
+- The base URL is validated at startup (absolute `http`/`https`, host, no path, query, fragment,
+  or credentials). A bad value stops the service instead of failing on every request.
+
+| Inventory Service outcome | Order Service error | Order Service response |
+| --- | --- | --- |
+| `201`/`200` with a matching reservation | (success) | `200`, order `reserved` |
+| `409` `insufficient stock` | `ErrInsufficientStock` | `409` |
+| `409`, any other message | `ErrInventoryConflict` | `409` |
+| `404` `unknown sku` | `ErrUnknownSKU` | `422` |
+| Connection refused or reset, `5xx`, cancelled | `ErrInventoryUnavailable` | `503` |
+| Timeout | `ErrInventoryTimeout` | `504` |
+| Anything else (malformed or mismatched body, other statuses, bare `404`) | `ErrInventoryBadResponse` | `502` |
+
+Business errors (stock, SKU, conflict) are definite answers. The last three rows are failures to
+get an answer, and the response says the order is unchanged and the call can be retried.
+
+### Testing
+
+- `inventoryclient`: an `httptest` server checks the exact request sent and every response
+  mapping, including malformed and mismatched bodies, a truncated response, a server that never
+  answers (timeout), a caller deadline, and a closed port (connection refused).
+- `order`: the use case with an in-memory fake, including failures leaving the order unchanged,
+  100 concurrent reserve calls producing one reservation, and the compare-and-set never letting a
+  later writer replace the first reservation.
+- `httpapi`: the full Order Service handler using the real client against an `httptest` fake of
+  the Inventory Service that keeps stock and deduplicates by `order_id`. It covers success, stored
+  reservation details, identical retries, 100 concurrent retries (one reservation, stock decreased
+  once), each failure mode, and recovery from a dropped connection after the Inventory Service had
+  already reserved (order stays `created`, then a retry returns the original reservation without
+  reserving again).
+
+### Limitations
+
+- Both services keep state in memory. If the Inventory Service restarts, `reserved` orders keep a
+  reservation ID it no longer knows and its stock is reset. If the Order Service restarts, its
+  orders are lost but their reservations stay held.
+- Reservations are never released or expired, including for abandoned orders.
+- An already-`reserved` order is answered locally, so a repeat call does not detect a lost
+  reservation after an Inventory Service restart.
+- The Inventory Service has no machine-readable error codes, so the client distinguishes
+  "insufficient stock" and "unknown sku" by their documented messages. A wording change there would
+  turn those into `409` conflict and `502` bad response respectively.
+- One fixed timeout, no automatic retry, no circuit breaker or rate limiting, and a single
+  configured URL.
 
 ## What exists today
 
 - `cmd/ruptiq-api`: Ruptiq Core program entry point.
 - `internal/api`: Ruptiq Core HTTP server with `GET /healthz`.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
-  `GET /orders/{id}`), with in-memory storage.
+  `GET /orders/{id}`, `POST /orders/{id}/reserve`), with in-memory storage. It reserves stock by
+  calling the Inventory Service over HTTP.
 - `demo/checkout/inventory-service`: the Inventory Service (`GET /healthz`,
   `GET /inventory/{sku}`, `POST /reservations`), with in-memory stock and idempotent,
   concurrency-safe reservations.
 - `demo/checkout/payment-service`: the Payment Service (`GET /healthz`, `POST /payments`,
   `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
-The four Core components above, the calls between checkout demo services, and any adapters are not
-implemented.
+The four Core components above, the Order-to-Payment call, and any adapters are not implemented.
 
 ## Decisions deferred
 

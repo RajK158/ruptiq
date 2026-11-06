@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/httpapi"
+	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/inventoryclient"
 	"github.com/RajK158/ruptiq/demo/checkout/order-service/internal/order"
 )
 
@@ -39,7 +40,12 @@ func run() error {
 		return err
 	}
 
-	srv := httpapi.NewServer(":"+port, order.NewStore())
+	inventory, err := inventoryClientFromEnv(os.Getenv("INVENTORY_SERVICE_URL"))
+	if err != nil {
+		return err
+	}
+
+	srv := httpapi.NewServer(":"+port, order.NewStore(), inventory)
 
 	// ctx is cancelled when the process receives Ctrl+C (SIGINT) or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -48,7 +54,7 @@ func run() error {
 	// Run the server in a goroutine so this function can wait for a signal.
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("order-service listening", "addr", srv.Addr)
+		slog.Info("order-service listening", "addr", srv.Addr, "inventory_service_url", inventory.BaseURL())
 		serveErr <- srv.ListenAndServe()
 	}()
 
@@ -72,6 +78,20 @@ func run() error {
 	}
 	slog.Info("order-service stopped")
 	return nil
+}
+
+// inventoryClientFromEnv builds the Inventory Service client from value, or
+// from the default URL when value is empty. An invalid URL is an error, so a
+// typo stops the service at startup instead of failing later on every reserve.
+func inventoryClientFromEnv(value string) (*inventoryclient.Client, error) {
+	if value == "" {
+		value = inventoryclient.DefaultBaseURL
+	}
+	c, err := inventoryclient.New(value, inventoryclient.DefaultTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("invalid INVENTORY_SERVICE_URL: %w", err)
+	}
+	return c, nil
 }
 
 // portFromEnv returns value as a validated port, or the default when empty.
