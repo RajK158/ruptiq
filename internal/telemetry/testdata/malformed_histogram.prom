@@ -1,0 +1,7 @@
+# Synthetic: bucket counts decrease, which no real histogram can produce.
+# TYPE app_latency_seconds histogram
+app_latency_seconds_bucket{le="0.1"} 5
+app_latency_seconds_bucket{le="1"} 3
+app_latency_seconds_bucket{le="+Inf"} 5
+app_latency_seconds_sum 1
+app_latency_seconds_count 5

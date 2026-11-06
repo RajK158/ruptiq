@@ -23,16 +23,17 @@ The first usable version is planned to cover:
 4. A separate checkout demo application used as the first test target.
 
 Item 1 has started: Ruptiq can run a short HTTP GET load test with k6, save its results as a JSON
-file, and compare two saved results, but has no run history yet. Item 2 has started on the target
-side only: the Inventory Service exposes Prometheus metrics, but Ruptiq Core does not read them
-yet. Item 3 does not exist yet; item 4 is in progress (see below). See
+file, and compare two saved results, but has no run history yet. Item 2 has started: the Inventory
+Service exposes Prometheus metrics, and Ruptiq Core can read one snapshot of any Prometheus
+endpoint, but does not yet collect telemetry while a load test runs. Item 3 does not exist yet; item 4 is in progress (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
 
 Ruptiq Core has a health-check server; `ruptiq-run`, a command that runs one HTTP GET load test
-with [k6](https://k6.io) against any URL and reports what k6 measured; and `ruptiq-compare`, which
-compares two saved `ruptiq-run` results offline. The checkout demo has three
+with [k6](https://k6.io) against any URL and reports what k6 measured; `ruptiq-compare`, which
+compares two saved `ruptiq-run` results offline; and `ruptiq-telemetry`, which reads one snapshot
+of a target's Prometheus metrics. The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
@@ -55,17 +56,19 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Load test runner (`ruptiq-run`, k6 adapter) | Done for one HTTP GET workload; unit tested with a fake k6, and run against the real k6 v2.3.0 (see below) |
 | Offline comparison of two saved runs (`ruptiq-compare`) | Done; descriptive only (no significance testing, no diagnosis); unit tested, and run on real saved k6 results (see below) |
 | Inventory Service Prometheus metrics (`GET /metrics`) | Done; unit tested and inspected on a running service. Smoke-test checks added; they first run in CI on the pull request (Docker is not installed on the development machine) |
+| Prometheus telemetry reader (`ruptiq-telemetry`, one snapshot) | Done; unit tested against local test servers, and run against the real Inventory Service (see below) |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
-| Telemetry collection by Ruptiq Core, investigation, run storage, load ramps | Not started |
+| Continuous telemetry collection during a load test, investigation, run storage, load ramps | Not started |
 
 ## Requirements
 
 - Go 1.27 or newer (see the `go` line in `go.mod`).
 - Network access the first time you build or test, so Go can download the official Prometheus Go
-  client libraries (`github.com/prometheus/client_golang`, `client_model`, and `common`). Only the
-  Inventory Service uses them; Ruptiq Core still uses the standard library only. `go.sum` pins
-  every module's checksum.
+  libraries (`github.com/prometheus/client_golang`, `client_model`, and `common`). The Inventory
+  Service uses the client library to expose metrics; Ruptiq Core uses only the text-format parser
+  (`common/expfmt`) and its data model (`client_model`) to read them. `go.sum` pins every module's
+  checksum.
 - Optional, for the containerized checkout demo: Docker with the Compose plugin (Docker Desktop
   on Windows or macOS, or Docker Engine with `docker compose` on Linux).
 - Optional, for load tests with `ruptiq-run`: [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
@@ -231,8 +234,8 @@ times, and the metrics above, using the same names), and `verdict`; or `error` a
 
 - One workload only: GET requests to one URL at a constant number of virtual users. No ramps, no
   other methods or request bodies, no custom headers, no think time between requests.
-- Results are client-side only (what k6 saw). Ruptiq does not read telemetry from the target
-  (the Inventory Service exposes some, but nothing collects it), and has no investigation and no
+- Results are client-side only (what k6 saw). Telemetry from the target is not collected during
+  the run (`ruptiq-telemetry` reads one snapshot, separately), and there is no investigation and no
   run history.
 - One k6 process on the local machine; no distributed load generation.
 - Because the whole query string is hidden, reports cannot tell apart runs that differ only in
@@ -376,6 +379,139 @@ does not apply, with the reason in `change_percent_note`.
   time series, and no telemetry from the target.
 - No diagnosis: the comparison says what changed, not why.
 - Redacted URLs cannot prove that two runs used the same query string or credentials.
+
+## Read a telemetry snapshot (`ruptiq-telemetry`)
+
+`ruptiq-telemetry` reads **one snapshot** of a target's metrics from any HTTP endpoint that serves
+the Prometheus text format, prints a short summary, and can save everything as JSON. It works with
+any Prometheus endpoint; it does not expect particular metric names. It does not run a load test,
+and it does not collect telemetry over time: one command, one request.
+
+```powershell
+go run ./cmd/ruptiq-telemetry -url http://localhost:8082/metrics -out snapshot.json
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-url` | (required) | The metrics endpoint, `http://` or `https://`. User name and password in the URL are sent as HTTP basic authentication. |
+| `-out` | none | Also write the snapshot (or the failure) as JSON to this file. |
+| `-timeout` | `10s` | Maximum time for the request and the whole response. |
+
+### Example: the Inventory Service
+
+Start the Inventory Service (`go run ./demo/checkout/inventory-service`, or Docker Compose), make
+one reservation and one stock read, then read its metrics. Real output, from the service on port
+`18082`, with a user name, password, and query string added to the URL to show how they are
+hidden:
+
+```text
+Endpoint:    http://xxxxx@127.0.0.1:18082/metrics?xxxxx
+Scraped at:  2026-11-06T12:32:33.025Z (took 5.1 ms)
+Contents:    5 families, 11 series (1 counter, 3 gauge, 1 histogram)
+
+inventory_http_request_duration_seconds  histogram, 2 series
+  {method="GET",route="/inventory/{sku}",status="200"}  count 1, sum 0, 17 buckets
+  {method="POST",route="/reservations",status="201"}  count 1, sum 0.0012588, 17 buckets
+
+inventory_http_requests_in_flight  gauge, 1 series
+  (no labels)  0
+
+inventory_http_requests_total  counter, 2 series
+  {method="GET",route="/inventory/{sku}",status="200"}  1
+  {method="POST",route="/reservations",status="201"}  1
+
+inventory_stock_available_units  gauge, 3 series
+  {sku="HEADPHONES-01"}  100
+  {sku="LAPTOP-001"}  10
+  {sku="PHONE-7"}  47
+
+inventory_stock_reserved_units  gauge, 3 series
+  {sku="HEADPHONES-01"}  0
+  {sku="LAPTOP-001"}  0
+  {sku="PHONE-7"}  3
+
+Full snapshot written to ...\after.json
+```
+
+The summary shows at most 30 metric families and 8 series per family, shortens long label values,
+and quotes names or values containing unusual characters. The JSON file always holds everything.
+(The `sum 0` for the stock read is the Windows clock timing a very fast request as 0 seconds.)
+
+### The JSON file
+
+```json
+{
+  "schema_version": 1,
+  "endpoint": "http://127.0.0.1:8082/metrics",
+  "snapshot": {
+    "endpoint": "http://127.0.0.1:8082/metrics",
+    "scraped_at": "2026-11-06T12:32:33.025Z",
+    "scrape_duration_seconds": 0.0051,
+    "families": [
+      {
+        "name": "inventory_http_requests_total",
+        "help": "HTTP requests completed by the Inventory Service, ...",
+        "type": "counter",
+        "series": [
+          {"labels": {"method": "POST", "route": "/reservations", "status": "201"}, "value": 1}
+        ]
+      }
+    ]
+  }
+}
+```
+
+(The structure, shortened to one family and one series, with values and help text abbreviated; the
+real file is indented one field per line.) Families are sorted by name and series by
+their labels. Each series has `labels` (omitted when there are none) and one of:
+
+- `value` for counters, gauges, and untyped metrics;
+- `histogram`: `count`, `sum`, and `buckets`, each with `upper_bound` and `cumulative_count` (the
+  number of observations less than or equal to the bound), including the `+Inf` bucket;
+- `summary`: `count`, `sum`, and `quantiles`.
+
+Prometheus allows values that JSON numbers cannot hold; they are written as the strings `"NaN"`,
+`"+Inf"`, and `"-Inf"`. `scraped_at` is when the request was sent. If the read fails, the file
+holds `error` instead of `snapshot`, so an older snapshot is never left behind.
+
+### Failures and exit status
+
+| Exit status | Meaning |
+| --- | --- |
+| `0` | The snapshot was read. |
+| `1` | It could not be read, or the `-out` file could not be written. The reason is printed, and recorded in the `-out` file. |
+| `2` | Invalid flags or URL; no request was sent. |
+
+Reasons are specific: the endpoint is unreachable, the timeout expired, the status was not `200`
+(with the first 200 bytes of the response body), the response was larger than 16 MiB, the
+`Content-Type` was not `text/plain` (HTML, JSON, OpenMetrics, and protobuf are rejected rather
+than misread), or the body is empty or not valid Prometheus text. Examples from the real service:
+
+```text
+ruptiq-telemetry: no snapshot: metrics endpoint returned an error status: GET http://127.0.0.1:18082/nope?xxxxx: 404 Not Found: {"error":"not found"}
+ruptiq-telemetry: no snapshot: metrics request failed: GET http://127.0.0.1:18082/metrics: dial tcp 127.0.0.1:18082: connectex: No connection could be made because the target machine actively refused it.
+```
+
+### Safety
+
+- The user name, password, and whole query string of the URL are replaced by `xxxxx` in
+  everything shown or saved, including error messages and echoed response bodies. The request
+  itself uses the complete URL.
+- The response is read up to 16 MiB after decompression; anything larger is rejected.
+- Only the summary's first families and series are printed, so a large or hostile endpoint cannot
+  flood the console.
+
+### Limitations
+
+- One snapshot per command. Nothing samples repeatedly, and nothing runs alongside `ruptiq-run`.
+- Only the Prometheus text format (version 0.0.4). OpenMetrics and protobuf responses are
+  rejected. Native histograms are not supported (they are not part of the text format).
+- Histogram checks rely on the `+Inf` bucket: without one, bucket counts are not compared with
+  the total count. A `le="NaN"` bucket is dropped by the parser rather than reported.
+- No TLS options (custom certificates, client certificates) and no bearer tokens; basic
+  authentication only, through the URL.
+- Values are recorded as exposed. Nothing is converted into rates or percentiles, and counters are
+  not compared between snapshots.
 
 ## Checkout demo with Docker Compose
 
@@ -1082,11 +1218,12 @@ spent outside the handler. The counts differ too: k6 counts requests that never 
 Neither number replaces the other. On Windows, the clock behind these timings can record very fast
 requests as 0 seconds; this was seen when running the service locally.
 
-**What Ruptiq Core still needs** before it can collect and investigate this telemetry
-automatically:
+**Reading it with Ruptiq Core:** `ruptiq-telemetry` reads one snapshot of these metrics (see
+[Read a telemetry snapshot](#read-a-telemetry-snapshot-ruptiq-telemetry)). What Ruptiq Core still
+needs before it can collect and investigate this telemetry automatically:
 
-- A `TelemetryReader` that scrapes `/metrics` (or queries a Prometheus server) before, during, and
-  after a run, with timestamps aligned to the run.
+- Repeated reads before, during, and after a run, with timestamps aligned to the run (the reader
+  takes one snapshot per call today).
 - A way to tell Ruptiq a target's metrics address, separately from the URL under load.
 - Turning counters and histograms into per-run rates and percentiles (differences between scrapes,
   handling counter resets when the service restarts). Histogram percentiles are estimates bounded
@@ -1321,11 +1458,14 @@ The Go module path is `github.com/RajK158/ruptiq`, matching the GitHub repositor
 cmd/ruptiq-api/                          Ruptiq Core: program entry point
 cmd/ruptiq-run/                          Ruptiq Core: load test command (flags, report, JSON results)
 cmd/ruptiq-compare/                      Ruptiq Core: run comparison command (flags, files, exit codes)
+cmd/ruptiq-telemetry/                    Ruptiq Core: telemetry snapshot command (flags, JSON file)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
 internal/comparison/                     Ruptiq Core: reads and validates saved runs, compares them,
                                          console output
+internal/telemetry/                      Ruptiq Core: TelemetryReader boundary, snapshot model, the
+                                         Prometheus HTTP reader, console summary
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors

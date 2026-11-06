@@ -4,8 +4,10 @@
 > first `WorkloadRunner` (one HTTP GET workload run with k6, see "WorkloadRunner: k6 adapter"
 > below), offline comparison of two saved runs (see "Run comparison"), and three checkout demo
 > services (Order, Inventory, and Payment), of which the Inventory Service exposes Prometheus
-> metrics (see "Inventory Service telemetry"). `TelemetryReader`,
-> `Investigator`, and `RunStore` do not exist in code yet. This document records the intended
+> metrics (see "Inventory Service telemetry"), and a first `TelemetryReader` that reads one
+> snapshot from a Prometheus endpoint (see "TelemetryReader: Prometheus reader").
+> `Investigator` and `RunStore` do not exist in code yet, and nothing collects telemetry during a
+> run. This document records the intended
 > direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
@@ -63,8 +65,9 @@ Responsible for reading the target's own signals during a run, such as CPU, memo
 error counts. This is how Ruptiq sees *inside* the target. Each kind of target can expose telemetry
 differently, so this is a main place where adapters plug in.
 
-The first telemetry to read exists on the target side: the Inventory Service's Prometheus
-`/metrics` endpoint (see "Inventory Service telemetry"). Nothing in Core reads it yet.
+A first version exists: it reads one snapshot from any Prometheus text-format endpoint, such as
+the Inventory Service's `/metrics` (see "TelemetryReader: Prometheus reader" below). Collecting
+snapshots while a workload runs does not exist yet.
 
 ### Investigator
 
@@ -304,6 +307,121 @@ One run per side; no repetition, aggregation, confidence intervals, or significa
 the saved summary numbers are compared (no per-request data or time series, no target
 telemetry). No diagnosis of causes. Redacted URLs limit what the comparability check can prove.
 
+## TelemetryReader: Prometheus reader
+
+```
+internal/telemetry/      the Reader interface; Snapshot, Family, Series, and the JSON Report;
+                         PrometheusReader (HTTP fetch, limits, parsing, redacted errors);
+                         WriteSummary (bounded console summary)
+cmd/ruptiq-telemetry/    flags, Ctrl+C, summary output, atomic JSON file, exit codes
+```
+
+The interface is what the one implementation needs, nothing more:
+
+```go
+type Reader interface {
+	Read(ctx context.Context) (Snapshot, error)
+}
+```
+
+`Read` returns a whole `Snapshot` or an error, never a partial snapshot. The endpoint and limits
+are configuration of the implementation (`PrometheusConfig`), not of the interface, so a reader for
+another kind of target (a Prometheus server's query API, cloud monitoring) can fit the same shape.
+Repeated sampling during a run will call `Read` on a schedule; that is not part of this boundary
+yet.
+
+### The snapshot model
+
+A `Snapshot` holds the redacted endpoint, `ScrapedAt` (when the request was sent, UTC), how long
+the request took, and the metric families sorted by name. Each `Family` keeps the target's own name,
+help text, and type (`counter`, `gauge`, `histogram`, `summary`, or `untyped`). Each `Series` keeps
+its labels as a map and exactly one of: a value (counters, gauges, untyped), a histogram (count,
+sum, and buckets with upper bound and cumulative count, including `+Inf`), or a summary (count,
+sum, quantiles). A timestamp is kept only if the target attached one to the sample.
+
+Nothing is renamed, derived, or assumed: Core does not know which metrics a target exposes, so no
+names such as `inventory_*` appear in Core code. Values that JSON numbers cannot represent (`NaN`,
+`+Inf`, `-Inf`, all legal in Prometheus) are written as strings by the `Float` type and read back by
+it.
+
+### How a read works
+
+1. `NewPrometheusReader` validates the URL (`http`/`https`, a host, a valid port, no fragment, no
+   spaces, at most 2048 characters), the timeout, and the size limit, without contacting the
+   endpoint.
+2. `Read` derives a context with the timeout (default 10 s) from the caller's, so both the timeout
+   and the caller's cancellation (Ctrl+C in the CLI) stop the request and the body read.
+3. The request asks for the text format (`Accept: text/plain;version=0.0.4`). User information in
+   the URL becomes HTTP basic authentication, as Go's client does by default.
+4. The status must be `200`. Otherwise the error carries the status and the first 200 bytes of the
+   body, on one line.
+5. `Content-Type` must be `text/plain` (or absent). HTML, JSON, OpenMetrics, and protobuf are
+   rejected instead of being fed to the wrong parser.
+6. The body is read through a limit (default 16 MiB, applied after Go's transparent gzip
+   decompression); one byte over is an error.
+7. The body is parsed with `expfmt.TextParser` from `github.com/prometheus/common`, the parser
+   Prometheus's own libraries use. An empty body, a body with no samples, and parse errors (with
+   their line number) are errors.
+8. Classic histograms are checked: whole-number counts, no duplicate bounds, cumulative counts
+   that never decrease once buckets are sorted by bound, and a `+Inf` bucket, when present, equal
+   to the count. Anything else is reported as invalid rather than stored. Known gaps: a histogram
+   without a `+Inf` bucket is accepted without comparing its buckets to the count, and the text
+   parser itself drops a `le="NaN"` bucket without an error.
+
+Errors wrap one of five sentinels for `errors.Is`: `ErrInvalidEndpoint`, `ErrFetch` (no response:
+unreachable, timed out, cancelled; it also wraps `context.DeadlineExceeded` or `context.Canceled`
+and the network error), `ErrHTTPStatus`, `ErrResponseTooLarge`, and `ErrInvalidMetrics`.
+
+### Redaction
+
+The endpoint is shown and stored through `workload.RedactURL` (user information and the whole
+query string become `xxxxx`), the same rule `ruptiq-run` uses. Error text is redacted twice: Go's
+`*url.Error`, which repeats the URL with only the password masked, is unwrapped and replaced by
+the redacted endpoint, and every message (including echoed response bodies) also goes through
+`workload.RedactText`. Unwrapping was checked to be redundant with the second layer, so either
+alone hides the secrets. The redaction helpers live in package `workload` because `ruptiq-run`
+introduced them; they are not specific to workloads.
+
+### Output
+
+`WriteSummary` prints the endpoint, time, totals by type, and then at most 30 families and 8 series
+per family. Names that are not plain Prometheus identifiers, and all label values, are quoted with
+control characters escaped, and long ones are shortened, so a large or hostile endpoint cannot
+flood or garble the console. The JSON file (`Report`, schema version 1) holds the full snapshot, or
+the error if the read failed; it is written atomically through a temporary file.
+
+### Testing
+
+All tests use `httptest` servers and fixtures in `internal/telemetry/testdata`; none need the
+Inventory Service, k6, Docker, or network access. `valid.prom` is a synthetic exposition (made-up
+values) with every family type, labels needing escapes, a negative gauge, `NaN`, a summary, and a
+sample timestamp. Tests cover:
+
+- Exact names, help, types, labels, values, buckets, sums, counts, and quantiles from that fixture,
+  and the `Accept` header sent.
+- Golden files for the JSON report and the console summary, and a JSON round trip.
+- Invalid bodies: empty, whitespace, comments only, syntax errors, bad values, decreasing buckets,
+  a `+Inf` bucket that disagrees with the count, fractional counts, and wrong content types.
+- Status errors with and without bodies (long ones cut), an unreachable port, a server that never
+  answers and one that stalls mid-body (timeout), cancellation by the caller, the size limit at and
+  one byte over, and a gzip body that is small compressed but too large decompressed.
+- Credentials and query strings reaching the server but absent from the snapshot and from status,
+  network, timeout, and configuration errors, including a server that echoes them back.
+- The summary's limits with 40 families of 20 series and hostile names and label values.
+- The CLI: summary and JSON, failures recorded in the file (replacing an older snapshot), redaction
+  in stdout, stderr, and the file, usage errors, and cancellation.
+
+The CLI was also run against the real Inventory Service before and after a reservation (see
+README.md): it captured the seed stock, then the reservation in the counters, histogram, and stock
+gauges.
+
+### Limitations
+
+One snapshot per call; nothing samples over time or runs beside `ruptiq-run`. Only the Prometheus
+text format; no OpenMetrics, protobuf, or native histograms. Basic authentication through the URL
+only; no bearer tokens or TLS settings. No conversion to rates or percentiles, and no comparison of
+snapshots.
+
 ## Checkout demo: Order Service
 
 The checkout demo is a small, controlled application that Ruptiq will break on purpose. It is
@@ -419,8 +537,8 @@ machine cannot run the race detector (no 64-bit C compiler).
 
 The service exposes server-side measurements at `GET /metrics` in the Prometheus text format, using
 the official Prometheus Go client (`client_golang`). This is the only checkout service with
-metrics, and the only part of the repository that depends on a third-party module; Ruptiq Core
-does not import it. README.md lists the metrics and shows how to inspect them.
+metrics; Ruptiq Core does not import `client_golang` (its reader uses only the text parser). README.md
+lists the metrics and shows how to inspect them.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -497,8 +615,9 @@ the Prometheus text parser (`expfmt`), so invalid exposition fails the test. It 
 Docker smoke test reads `/metrics` after the checkout scenarios and checks the stock gauges, the
 number of created reservations, the stock-read count, and that no IDs appear.
 
-**What Core still needs** to use this automatically: a `TelemetryReader` that scrapes the endpoint
-(or queries a Prometheus server) around a run with timestamps aligned to it; target configuration
+**What Core still needs** to use this automatically: Core's `TelemetryReader` can read one
+snapshot of this endpoint (see "TelemetryReader: Prometheus reader"); still missing are repeated
+reads around a run with timestamps aligned to it; target configuration
 naming the metrics address separately from the URL under load; conversion of counters and
 histograms into per-run rates and estimated percentiles, including counter resets on restart;
 storage of telemetry with each run (`RunStore`); an `Investigator` that relates client-side and
@@ -904,6 +1023,8 @@ checkout works across the three containers.
   HTTP GET workload run with k6, with a CLI report and JSON results.
 - `cmd/ruptiq-compare`, `internal/comparison`: offline, descriptive comparison of two saved run
   reports.
+- `cmd/ruptiq-telemetry`, `internal/telemetry`: the first `TelemetryReader`, reading one snapshot
+  from a Prometheus text-format endpoint, with a console summary and JSON output.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -917,7 +1038,7 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-`TelemetryReader` (nothing in Core reads the Inventory Service's metrics), `Investigator`,
+Telemetry collection during a run (the reader takes single snapshots), `Investigator`,
 `RunStore` (run history), load ramps, cancellation and compensation across services, persistence,
 target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
 tracing are not implemented.
@@ -925,9 +1046,9 @@ tracing are not implemented.
 ## Decisions deferred
 
 - Where each further checkout demo service lives (under `demo/checkout/`, separate from Core).
-- Whether the demo eventually gets its own Go module (it shares Core's module for now). Because of
-  the shared module, Core's `go.mod` lists the Prometheus client even though no Core package
-  imports it.
+- Whether the demo eventually gets its own Go module (it shares Core's module for now). Core
+  imports only the Prometheus text parser and data model (`common/expfmt`, `client_model`); the
+  client library (`client_golang`) is in `go.mod` for the Inventory Service alone.
 - Storage technology for `RunStore`.
 - Whether load generation stays with k6 for ramps, other request types, and distributed load.
 - The adapter mechanism for external targets.

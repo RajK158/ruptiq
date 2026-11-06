@@ -1,0 +1,36 @@
+# Synthetic exposition for tests: made-up values, not from a real target.
+# HELP app_requests_total Requests handled.
+# TYPE app_requests_total counter
+app_requests_total{method="GET",route="/items/{id}",status="200"} 1027
+app_requests_total{method="POST",route="/items",status="201"} 3
+app_requests_total{method="GET",route="/items/{id}",status="404"} 0
+# HELP app_queue_depth Jobs waiting.
+# TYPE app_queue_depth gauge
+app_queue_depth 7.5
+# HELP app_temperature_celsius A gauge with a negative value and escaped labels.
+# TYPE app_temperature_celsius gauge
+app_temperature_celsius{room="cold \"store\"",path="C:\\data\nline2"} -3.25
+# HELP app_ratio A gauge that is not a number.
+# TYPE app_ratio gauge
+app_ratio NaN
+# HELP app_request_duration_seconds Request latency.
+# TYPE app_request_duration_seconds histogram
+app_request_duration_seconds_bucket{route="/items/{id}",le="0.001"} 600
+app_request_duration_seconds_bucket{route="/items/{id}",le="0.01"} 1000
+app_request_duration_seconds_bucket{route="/items/{id}",le="0.1"} 1027
+app_request_duration_seconds_bucket{route="/items/{id}",le="+Inf"} 1027
+app_request_duration_seconds_sum{route="/items/{id}"} 1.5
+app_request_duration_seconds_count{route="/items/{id}"} 1027
+app_request_duration_seconds_bucket{route="/items",le="0.001"} 0
+app_request_duration_seconds_bucket{route="/items",le="0.01"} 2
+app_request_duration_seconds_bucket{route="/items",le="0.1"} 3
+app_request_duration_seconds_bucket{route="/items",le="+Inf"} 3
+app_request_duration_seconds_sum{route="/items"} 0.0625
+app_request_duration_seconds_count{route="/items"} 3
+# HELP app_gc_pause_seconds Pause times.
+# TYPE app_gc_pause_seconds summary
+app_gc_pause_seconds{quantile="0.5"} 0.0002
+app_gc_pause_seconds{quantile="0.99"} 0.004
+app_gc_pause_seconds_sum 0.25
+app_gc_pause_seconds_count 400
+app_build_info{version="1.2.3"} 1 1762430400000
