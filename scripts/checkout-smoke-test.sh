@@ -106,12 +106,33 @@ wait_for_health() {
   log "  $name healthy"
 }
 
+# Successful stock reads made by this script. Nothing else reads stock, so the
+# Inventory Service's request counter must match it exactly.
+STOCK_READS=0
+
 expect_stock() {
   request GET "$INVENTORY_URL/inventory/$1"
   expect_status 200
+  STOCK_READS=$((STOCK_READS + 1))
   expect_field .sku "$1"
   expect_field .available "$2"
   expect_field .reserved "$3"
+}
+
+# expect_metric SERIES EXPECTED: SERIES is the exact text before the value on
+# one line of a Prometheus exposition in BODY, such as
+# 'inventory_stock_available_units{sku="PHONE-7"}'.
+expect_metric() {
+  local actual
+  if ! actual="$(awk -v s="$1" '$1 == s { print $2; found = 1 } END { exit !found }' <<<"$BODY")"; then
+    fail "metrics have no series $1"
+  fi
+  [[ "$actual" == "$2" ]] || fail "expected $1 = $2, got $actual"
+}
+
+# expect_absent TEXT: BODY must not contain TEXT.
+expect_absent() {
+  [[ "$BODY" != *"$1"* ]] || fail "response unexpectedly contains '$1'"
 }
 
 reserve_order() {
@@ -255,5 +276,28 @@ expect_field .status paid
 expect_field .payment_id "$approved_c"
 expect_field .payment_idempotency_key checkout-c-2
 expect_stock PHONE-7 49 1
+
+log "== Test D: Inventory Service metrics reflect the checkouts"
+log "D1: stock gauges match the reservations above"
+request GET "$INVENTORY_URL/metrics"
+expect_status 200
+expect_metric 'inventory_stock_available_units{sku="LAPTOP-001"}' 8
+expect_metric 'inventory_stock_reserved_units{sku="LAPTOP-001"}' 2
+expect_metric 'inventory_stock_available_units{sku="PHONE-7"}' 49
+expect_metric 'inventory_stock_reserved_units{sku="PHONE-7"}' 1
+expect_metric 'inventory_stock_available_units{sku="HEADPHONES-01"}' 100
+expect_metric 'inventory_stock_reserved_units{sku="HEADPHONES-01"}' 0
+
+log "D2: request metrics count each reservation once, by route template"
+expect_metric 'inventory_http_requests_total{method="POST",route="/reservations",status="201"}' 2
+expect_metric 'inventory_http_request_duration_seconds_count{method="POST",route="/reservations",status="201"}' 2
+expect_metric 'inventory_http_requests_total{method="GET",route="/inventory/{sku}",status="200"}' "$STOCK_READS"
+
+log "D3: no order, reservation, or payment IDs in labels; scrapes are not counted"
+for id in "$order_a" "$order_c" "$reservation_a" "$payment_a"; do
+  expect_absent "$id"
+done
+expect_absent 'route="/metrics"'
+expect_absent 'route="/inventory/LAPTOP-001"'
 
 log "PASS: all checkout smoke tests passed"

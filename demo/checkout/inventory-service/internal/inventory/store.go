@@ -1,6 +1,8 @@
 package inventory
 
 import (
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,6 +53,20 @@ func (s *Store) Get(sku string) (Item, error) {
 		return Item{}, ErrUnknownSKU
 	}
 	return Item{SKU: sku, Available: st.available, Reserved: st.reserved}, nil
+}
+
+// Snapshot returns the stock of every SKU in the catalog, sorted by SKU. All
+// items are read under one lock, so they describe the same moment: no
+// reservation is ever half-reflected.
+func (s *Store) Snapshot() []Item {
+	s.mu.RLock()
+	items := make([]Item, 0, len(s.stock))
+	for sku, st := range s.stock {
+		items = append(items, Item{SKU: sku, Available: st.available, Reserved: st.reserved})
+	}
+	s.mu.RUnlock()
+	slices.SortFunc(items, func(a, b Item) int { return strings.Compare(a.SKU, b.SKU) })
+	return items
 }
 
 // Reserve holds req.Quantity units of req.SKU for req.OrderID.

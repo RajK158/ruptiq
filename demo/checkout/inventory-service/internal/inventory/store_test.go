@@ -54,6 +54,55 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestSnapshot(t *testing.T) {
+	s := NewStore(map[string]int{"SKU-B": 5, "SKU-A": 10, "SKU-C": -3})
+	if _, _, err := s.Reserve(ReserveRequest{OrderID: "ord_1", SKU: "SKU-A", Quantity: 4}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.Snapshot()
+	want := []Item{
+		{SKU: "SKU-A", Available: 6, Reserved: 4},
+		{SKU: "SKU-B", Available: 5, Reserved: 0},
+		{SKU: "SKU-C", Available: 0, Reserved: 0},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("Snapshot() = %+v, want %+v", got, want)
+	}
+
+	// The result is a copy: changing it does not change the store.
+	got[0].Available = 999
+	if item := mustItem(t, s, "SKU-A"); item.Available != 6 {
+		t.Errorf("store changed through snapshot: %+v", item)
+	}
+}
+
+func TestSnapshotDuringConcurrentReservations(t *testing.T) {
+	// Every snapshot must show whole reservations: for each SKU, the reserved
+	// units always equal the units that left available. Mainly useful under
+	// `go test -race`.
+	s := NewStore(map[string]int{"SKU-A": 100, "SKU-B": 100})
+	startTogether(200, func(i int) {
+		if i%2 == 0 {
+			sku := []string{"SKU-A", "SKU-B"}[i%4/2]
+			_, _, _ = s.Reserve(ReserveRequest{OrderID: fmt.Sprintf("ord_%d", i), SKU: sku, Quantity: 1})
+			return
+		}
+		for _, item := range s.Snapshot() {
+			if item.Available < 0 || item.Available+item.Reserved != 100 {
+				t.Errorf("inconsistent snapshot item: %+v", item)
+			}
+		}
+	})
+	total := 0
+	for _, item := range s.Snapshot() {
+		total += item.Reserved
+	}
+	if total != 100 {
+		t.Errorf("reserved units = %d, want 100", total)
+	}
+}
+
 func TestReserve(t *testing.T) {
 	s := newTestStore(10)
 

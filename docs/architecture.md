@@ -3,7 +3,8 @@
 > **Status: mostly planned design.** Implemented today: the Ruptiq Core health-check server, a
 > first `WorkloadRunner` (one HTTP GET workload run with k6, see "WorkloadRunner: k6 adapter"
 > below), offline comparison of two saved runs (see "Run comparison"), and three checkout demo
-> services (Order, Inventory, and Payment). `TelemetryReader`,
+> services (Order, Inventory, and Payment), of which the Inventory Service exposes Prometheus
+> metrics (see "Inventory Service telemetry"). `TelemetryReader`,
 > `Investigator`, and `RunStore` do not exist in code yet. This document records the intended
 > direction so early code does not paint us into a corner.
 
@@ -61,6 +62,9 @@ A first version exists (constant load only, no ramps); see "WorkloadRunner: k6 a
 Responsible for reading the target's own signals during a run, such as CPU, memory, queue depth, or
 error counts. This is how Ruptiq sees *inside* the target. Each kind of target can expose telemetry
 differently, so this is a main place where adapters plug in.
+
+The first telemetry to read exists on the target side: the Inventory Service's Prometheus
+`/metrics` endpoint (see "Inventory Service telemetry"). Nothing in Core reads it yet.
 
 ### Investigator
 
@@ -358,7 +362,7 @@ demo/checkout/inventory-service/
   main.go              entry point: reads INVENTORY_SERVICE_PORT (default 8082), JSON logging,
                        graceful shutdown
   internal/httpapi/    HTTP layer: routes, strict JSON decoding, status codes, timeouts,
-                       request logging
+                       request logging; Prometheus metrics (metrics.go)
   internal/inventory/  domain layer: stock, reservations, validation, seed data, in-memory Store
 ```
 
@@ -366,7 +370,8 @@ It follows the same boundary rules as the Order Service: it imports nothing from
 from the Order Service, its packages are private under `inventory-service/internal/`, and `httpapi`
 only translates between HTTP and the `inventory` package, which knows nothing about HTTP.
 
-Endpoints: `GET /healthz`, `GET /inventory/{sku}`, and `POST /reservations`. Status codes: `201`
+Endpoints: `GET /healthz`, `GET /inventory/{sku}`, `POST /reservations`, and `GET /metrics`
+(Prometheus). Status codes: `201`
 for a new reservation, `200` for an idempotent replay, `400` malformed body, `404` unknown SKU or
 path, `405` wrong method, `409` insufficient stock or an `order_id` conflict, `413` oversized body,
 `422` invalid values.
@@ -409,6 +414,95 @@ simultaneous reservation attempts at 10 units (through the store and through a r
 negative. A separate test sends 100 simultaneous retries of one `order_id` and checks that stock is
 decreased once. CI runs the whole suite with `go test -race` on Linux; the Windows development
 machine cannot run the race detector (no 64-bit C compiler).
+
+### Inventory Service telemetry
+
+The service exposes server-side measurements at `GET /metrics` in the Prometheus text format, using
+the official Prometheus Go client (`client_golang`). This is the only checkout service with
+metrics, and the only part of the repository that depends on a third-party module; Ruptiq Core
+does not import it. README.md lists the metrics and shows how to inspect them.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `inventory_http_requests_total` | counter | `method`, `route`, `status` |
+| `inventory_http_request_duration_seconds` | histogram (100 µs to 10 s) | `method`, `route`, `status` |
+| `inventory_http_requests_in_flight` | gauge | none |
+| `inventory_stock_available_units` | gauge | `sku` |
+| `inventory_stock_reserved_units` | gauge | `sku` |
+
+**Registry.** `NewHandler` creates a fresh `prometheus.Registry` for each handler. Nothing is
+registered in the client library's global registry, so tests and multiple handlers in one process
+never share metrics, and the output holds only these five metrics (no Go runtime or process
+metrics yet).
+
+**HTTP metrics.** One middleware, `observeRequests`, wraps the router. It logs every request as
+before, and for every request except those to `/metrics` it increments the in-flight gauge, runs
+the router, then records the count and duration. The route label comes from `r.Pattern`, which
+`ServeMux` sets on the request it was given, so the middleware sees the matched pattern after the
+router returns. `routeLabel` strips the method from the pattern (`GET /inventory/{sku}` becomes
+`/inventory/{sku}`) and accepts only the registered templates; anything else, including the
+catch-all `/` pattern and redirects that `ServeMux` issues itself (whose pattern can be a raw path),
+becomes `unmatched`. Methods outside the standard set become `OTHER`. Requests to `/metrics` skip
+the in-flight gauge and the counters entirely, so a scrape never sees itself.
+
+The status comes from a `statusRecorder` around the response writer. It keeps the first final
+(non-1xx) status, treats a body written without `WriteHeader` as `200`, and implements `Unwrap`,
+so `http.ResponseController` can still reach the underlying writer's flushing and deadlines.
+
+**Stock gauges.** A custom collector, `inventoryCollector`, keeps no numbers of its own. On each
+scrape it calls `Store.Snapshot`, which copies every SKU's `available` and `reserved` under one
+read lock and releases it before returning. The collector then builds constant metrics from the
+copy. Consequences:
+
+- The gauges cannot drift from the store, because there is nothing separate to update. A
+  successful reservation shows up on the next scrape; replays and rejected requests change
+  nothing in the store, so they change nothing in the gauges.
+- A scrape sees each reservation either completely or not at all, across all SKUs.
+- The store lock is held only to copy a few integers; no lock is held while metrics are encoded or
+  the HTTP response is written.
+- The `sku` label set is the catalog in the store, never a value taken from a request.
+
+**Bounded labels.** Every label value comes from a fixed set: the route templates plus
+`unmatched`, the standard methods plus `OTHER`, status codes the service sends, and the catalog's
+SKUs. Order IDs, reservation IDs, request paths, query strings, bodies, and credentials never
+become labels, because each new value would be a new time series held in memory forever, and could
+expose identifiers.
+
+**Server-side versus client-side.** The histogram measures from the moment the handler chain
+receives the request (headers already read) until the handler returns. k6's latency in
+`ruptiq-run` adds the network, connection handling, and anything queued before the handler, so the
+gap between the two is time spent outside the service's handler. Counts differ as well: k6 counts
+requests that never reached the service; the service counts requests from every client.
+
+**Testing.** `metrics_test.go` scrapes `/metrics` through the handler and parses every response with
+the Prometheus text parser (`expfmt`), so invalid exposition fails the test. It checks:
+
+- The five metric families, their types, and HELP text; independent registries per handler.
+- Exact request counts per method, route, and status for a mix of successful, replayed, rejected,
+  invalid, wrong-method, and unknown-path requests, with one histogram observation each.
+- Histogram buckets, using fixed durations passed to the recorder, so no assertion depends on real
+  latency.
+- The in-flight gauge while three requests are held inside a handler (`/metrics` scrapes during
+  that time do not count themselves), then back to zero.
+- Stock gauges at start, after a reservation, after idempotent replays, and after rejected
+  reservations (insufficient stock, conflict, unknown SKU, invalid, malformed).
+- 150 concurrent reservations for 10 units over a real `httptest` server while 30 scrapes run, with
+  every scrape internally consistent and exact final counts.
+- 150+ requests with IDs, secrets, and odd methods in paths, queries, and bodies: none appear in the
+  output, every route and method label is from the allowed set, and the total count excludes
+  scrapes.
+- The status recorder's edge cases and that flushing still works through it.
+
+`Store.Snapshot` has its own tests, including snapshots taken during concurrent reservations. The
+Docker smoke test reads `/metrics` after the checkout scenarios and checks the stock gauges, the
+number of created reservations, the stock-read count, and that no IDs appear.
+
+**What Core still needs** to use this automatically: a `TelemetryReader` that scrapes the endpoint
+(or queries a Prometheus server) around a run with timestamps aligned to it; target configuration
+naming the metrics address separately from the URL under load; conversion of counters and
+histograms into per-run rates and estimated percentiles, including counter resets on restart;
+storage of telemetry with each run (`RunStore`); an `Investigator` that relates client-side and
+server-side numbers; and metrics from the Order and Payment Services.
 
 ### Seed data and limitations
 
@@ -750,8 +844,10 @@ host (127.0.0.1 only)          Compose network "ruptiq-checkout_default"
   plus the binary. Alpine was chosen over a shell-less image so that its busybox `wget` can run the
   health checks without adding code or packages to the services.
 - **Independence from Core.** The Dockerfile lives under `demo/checkout/`, and the root
-  `.dockerignore` is an allow-list that sends only `go.mod` and `demo/checkout/` (minus tests) to
-  the builder. Core code cannot enter these images, and Core has no Docker setup.
+  `.dockerignore` is an allow-list that sends only `go.mod`, `go.sum`, and `demo/checkout/` (minus
+  tests) to the builder. Core code cannot enter these images, and Core has no Docker setup. Go
+  modules (the Prometheus client used by the Inventory Service) are downloaded in a separate,
+  cached layer, verified against `go.sum`.
 - **Service discovery.** The Order Service gets `INVENTORY_SERVICE_URL` and `PAYMENT_SERVICE_URL`
   set to Compose service names. The existing URL validation accepts them unchanged.
 - **Health and startup.** Each service is checked with `GET /healthz` (every 5 s, 3 s timeout, 5
@@ -791,7 +887,8 @@ the Go job:
 3. `docker compose up --detach --wait --wait-timeout 120`: Compose polls the health checks and
    fails if any service exits or is not healthy within 120 s. No fixed sleeps.
 4. `bash scripts/checkout-smoke-test.sh`: real HTTP checkout scenarios with exact status and body
-   assertions (successful checkout, idempotent repeats, decline then approval).
+   assertions (successful checkout, idempotent repeats, decline then approval), then checks of the
+   Inventory Service's `/metrics` against those scenarios.
 5. On failure: `docker compose ps --all`, each container's health check history, and all logs.
 6. Always: `docker compose down --volumes --remove-orphans --rmi all`.
 
@@ -813,20 +910,24 @@ checkout works across the three containers.
   calling the Payment Service, both over HTTP.
 - `demo/checkout/inventory-service`: the Inventory Service (`GET /healthz`,
   `GET /inventory/{sku}`, `POST /reservations`), with in-memory stock and idempotent,
-  concurrency-safe reservations.
+  concurrency-safe reservations, and Prometheus metrics at `GET /metrics`.
 - `demo/checkout/payment-service`: the Payment Service (`GET /healthz`, `POST /payments`,
   `GET /payments/{id}`), with simulated, idempotent payments and in-memory storage.
 
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-`TelemetryReader`, `Investigator`, `RunStore` (run history), load ramps, cancellation and
-compensation across services, persistence, and target adapters are not implemented.
+`TelemetryReader` (nothing in Core reads the Inventory Service's metrics), `Investigator`,
+`RunStore` (run history), load ramps, cancellation and compensation across services, persistence,
+target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
+tracing are not implemented.
 
 ## Decisions deferred
 
 - Where each further checkout demo service lives (under `demo/checkout/`, separate from Core).
-- Whether the demo eventually gets its own Go module (it shares Core's module for now).
+- Whether the demo eventually gets its own Go module (it shares Core's module for now). Because of
+  the shared module, Core's `go.mod` lists the Prometheus client even though no Core package
+  imports it.
 - Storage technology for `RunStore`.
 - Whether load generation stays with k6 for ramps, other request types, and distributed load.
 - The adapter mechanism for external targets.
