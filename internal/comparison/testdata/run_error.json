@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "error": "k6 executable not found: 'k6' (install k6 from https://grafana.com/docs/k6/latest/set-up/install-k6/ or set its path)",
+  "verdict": {
+    "passed": false,
+    "max_failure_rate": 0,
+    "reasons": [
+      "the run did not complete"
+    ]
+  }
+}
