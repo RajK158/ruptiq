@@ -8,8 +8,10 @@
 > snapshot from a Prometheus endpoint (see "TelemetryReader: Prometheus reader"), and an
 > experiment coordinator that samples that reader periodically while the k6 workload runs (see
 > "Experiment: workload with telemetry sampling"), and offline signal extraction from a saved
-> experiment report (see "Signal extraction: analysing a saved experiment"). `Investigator` and
-> `RunStore` do not exist in code yet. This document records the intended
+> experiment report (see "Signal extraction: analysing a saved experiment"), and a first,
+> deterministic `Investigator` that ranks evidence-backed findings from a saved analysis (see
+> "Investigator: evidence-driven findings"). It reports observations and hypotheses, not root
+> causes. `RunStore` does not exist in code yet. This document records the intended
 > direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
@@ -78,11 +80,16 @@ Responsible for analyzing the results of a run (client-side results plus target 
 where the system broke and the likely bottleneck. It works on recorded data and should not drive
 load or talk to the target directly, which keeps it easy to test with saved runs.
 
-It does not exist yet. Its first input does: signal extraction (package `internal/analysis`)
-turns a saved experiment's cumulative metrics into per-window rates, error shares, and latency
-estimates, with references to the samples they came from (see "Signal extraction: analysing a
-saved experiment"). Extraction describes measurements; deciding what they mean is the
-Investigator's job.
+Its input is signal extraction (package `internal/analysis`), which turns a saved experiment's
+cumulative metrics into per-window rates, error shares, and latency estimates, with references to
+the samples they came from (see "Signal extraction: analysing a saved experiment"). Extraction
+describes measurements; deciding what they mean is the Investigator's job.
+
+A first version exists (package `internal/investigation`, see "Investigator: evidence-driven
+findings"). It compares earlier and later windows of one experiment and reports ranked
+observations of degradation, each with evidence references, limitations, and a validation
+experiment, or abstains. Locating "the likely bottleneck" needs measurements Ruptiq does not
+collect yet (resources such as CPU, or dependencies), so it does not name causes.
 
 ### RunStore
 
@@ -96,7 +103,8 @@ runs over time and re-run an investigation on old data. The storage technology i
    experiment coordinator for one workload and one Prometheus endpoint.)
 3. The results are saved through `RunStore`. (Today: one JSON report file per experiment.)
 4. `Investigator` reads the saved run and produces findings. (Today: `ruptiq-analyze` extracts
-   signals from a saved experiment report; nothing interprets them yet.)
+   signals from a saved experiment report, and `ruptiq-investigate` ranks the changes between its
+   earlier and later windows as observations and hypotheses to test.)
 
 ## WorkloadRunner: k6 adapter
 
@@ -588,7 +596,7 @@ by dropping an earlier one.
 
 Package `internal/analysis` and the `ruptiq-analyze` command read one saved experiment report
 and calculate performance signals from its telemetry samples. This is the first step of
-evidence analysis, kept separate from the future `Investigator`: it turns raw, cumulative
+evidence analysis, kept separate from the `Investigator`: it turns raw, cumulative
 measurements into numbers with stated uncertainty and exact references to their source, and
 draws no conclusions. It works offline on the file only and imports neither the checkout demo nor
 any target: the metric family names and the method, route, and status label keys are
@@ -731,7 +739,175 @@ end of the run include time without full load, and on a freshly started service 
 is usually unavailable because series appear at their first request. Only one request counter
 and one duration histogram are interpreted. The whole report is held in memory (bounded by
 `-max-input-bytes`, default 128 MiB). Signal extraction is not diagnosis: it does not rank
-causes, explain changes, or compare experiments.
+causes, explain changes, or compare experiments. The Investigator (below) interprets its output.
+
+## Investigator: evidence-driven findings
+
+Package `internal/investigation` and the `ruptiq-investigate` command read one saved analysis
+(written by `ruptiq-analyze -out`) and report ranked findings. This is the first `Investigator`.
+It is a fixed set of deterministic rules over the analysis' signals: no language model, no
+generated text beyond templates, no statistical significance tests, and no confidence
+percentages. It does not repeat signal extraction: it uses the analysis' per-window rates, 5xx
+ratios, and p95 estimates as they are, through the `internal/analysis` types.
+
+```
+analysis.json --ReadAnalysis--> analysis.Analysis --Investigate--> Investigation --WriteSummary--> console
+ (strict decode,                  (select windows, assess           (findings, assessments,     \--> investigation.json
+  validation)                      each route and signal, rank)      windows, limitations)
+```
+
+### Reading a saved analysis
+
+`DecodeAnalysis` reads the `schema_version` first (missing or non-integer: invalid; any value
+other than `analysis.SchemaVersion`: unsupported), then decodes strictly (unknown fields and
+trailing data rejected). A file that records a failed analysis is refused with
+`ErrNotInvestigable`. Then every consistency rule that a later step relies on is checked, and every
+problem collected (up to 10 listed): window indexes from 1, sample sequences increasing and
+chained (each window starts at the sample the previous one ends at), known phases, positive window
+lengths equal to their timestamps' difference, missed scrapes inside their window, exactly one of
+each signal and its "unavailable" reason, finite and non-negative counts, rates equal to requests
+divided by elapsed time, status counts adding up, 5xx ratios equal to their counts, cumulative
+buckets, p95 estimates marked as estimates, within their bucket, and from at least the analysis'
+minimum observations, evidence for the configured metrics, and no repeated routes. A file that
+passes cannot make the engine divide by zero or compare values that contradict each other.
+
+### Windows and sides
+
+Only windows whose two samples have phase `during_workload` and that span no missed scrapes are
+comparable; the others are listed in `windows.excluded` with a reason and a JSON pointer. For each
+route and each of three signals (throughput, server error ratio, p95 latency), the comparable
+windows in which the signal is available are its usable windows; the others become `gaps` with the
+analysis' reason ("the route has no series in this window", a reset, changed buckets, a p95 that
+could not be estimated, and so on). The earlier half of the usable windows is the baseline and the
+later half the comparison; with an odd count the middle window is left out. Each signal has its
+own sides, so a gap in one signal does not discard the others.
+
+### Assessments
+
+Each route and signal gets one `Assessment`, with status `material_change`,
+`no_material_change`, `inconclusive`, or `insufficient_evidence`:
+
+| Signal | Side value | Insufficient when | Material when | Inconclusive when |
+| --- | --- | --- | --- | --- |
+| throughput | median of window rates (requests/s) | fewer than 2 x `MinWindows` usable windows; baseline below `MinRequests` requests; zero baseline median | fall of at least `ThroughputDecrease`, and every comparison window below every baseline window | the fall reaches the threshold but the windows overlap |
+| server error ratio | pooled 5xx / requests (ratio) | too few windows; either side below `MinRequests` | rise of at least `ErrorRatioIncrease` (absolute), at least `MinServerErrors` 5xx in the comparison, and (non-zero baseline) at least `ErrorRatioFactor` times the baseline | the rise reaches the threshold but there are too few 5xx or it is less than the factor |
+| p95 latency | median of window p95 estimates (seconds) | too few windows; either side below `MinRequests` observations; zero baseline median | rise of at least `LatencyIncrease`, and the comparison's lowest bucket lower bound at or above the baseline's highest bucket upper bound | the rise reaches the threshold but the buckets overlap |
+
+Medians keep one unusual window from deciding a rate or a p95; the error ratio is pooled because
+5xx counts per window are small. The separation checks are the noise and resolution safeguards:
+within one histogram bucket a p95 estimate is a linear interpolation, so a rise inside overlapping
+buckets may not be real, and rates whose windows overlap could be noise. Throughput needs
+`MinRequests` in the baseline only, so a collapse to almost no traffic is still detected. A zero
+baseline is never divided by: rates and p95 abstain, and a 5xx rise from 0% has no relative change.
+Each `Change` records the absolute and relative change and its `threshold_multiple` (the change
+divided by its threshold, in the direction of degradation).
+
+### Findings
+
+A material change becomes an observation: `server_error_increase`, `latency_degradation`, or
+`throughput_degradation`. When latency and throughput both degrade for one route over identical
+sides, a `combined_degradation` finding is added, designated a **hypothesis**, which links the two
+(`related`); with different sides they are not combined and each says so. A route with any
+insufficient signal gets one `insufficient_evidence` finding (an **abstention**), listing each
+signal's reason and gaps. Inconclusive assessments are not findings. Every finding carries:
+
+- a stable ID (type plus the first 12 hex digits of a SHA-256 of method and route), type,
+  designation (`observation`, `hypothesis`, or `abstention`), and `proven_root_cause: false`;
+- the method and route, a one-line symptom, and the compared values with units (`requests/s`,
+  `ratio`, `seconds`), the statistic used, the requests or observations, and for p95 the bucket
+  range;
+- the baseline and comparison windows, and evidence references: an RFC 6901 JSON pointer into the
+  analysis file for every window used (for example `/analysis/windows/1/routes/0/latency/p95`),
+  with its role, metric, and series labels; abstentions point at the analysis warnings about the
+  route and at the route in excluded windows;
+- an explanation (which rule fired, over which windows), contradictions found in the same data,
+  limitations, untested hypotheses, and a concrete next validation experiment.
+
+Contradictions are measurements that weaken a finding: a latency rise while the request rate
+also rose by at least `ThroughputDecrease` (more load), the mean falling while p95 rose, a
+throughput fall without a latency rise (the load generator may have sent less), a 5xx rise without
+a latency rise, and comparison windows whose 5xx ratio did not rise.
+
+### Avoiding false attribution
+
+The analysis has request counts, status codes, and latency histograms. The engine therefore never
+states a cause: CPU, locks, connection pools, dependencies, or databases appear only in
+`possible_explanations`, each prefixed "Hypothesis (untested):" with the measurement that is
+missing. Fixed limitations on every finding say that it is a change within one run, not a
+regression, and that no significance test was made; error findings say a higher 5xx ratio does not
+by itself mean lower capacity; latency findings give the bucket ranges and say client- and
+server-side latency are not compared; combined findings say correlation does not show causation and
+that with fixed VUs higher latency lowers the request rate by itself. The investigation's own
+limitations repeat what is not measured.
+
+### Ranking
+
+Findings are sorted by: observations and hypotheses before abstentions; severity (`major` when the
+threshold multiple is at least 2, else `moderate`); type (combined, server errors, latency,
+throughput); larger threshold multiple; more windows, then more requests compared; then method,
+route, and ID. The rule and the values are written into each finding's `ranking`. The order does
+not depend on the order of routes in the analysis.
+
+### Outcome
+
+`changes_observed` if any finding is an observation; otherwise `no_material_change` if any signal
+was compared; otherwise `insufficient_evidence` (the investigation abstains, also when the analysis
+has no routes or windows). A `no_material_change` outcome says this run showed no material change,
+not that there is none.
+
+### Report model and command
+
+`Report{schema_version, input, investigation | error}`; exactly one of `investigation` and `error`
+is set. `Investigation` holds the source (experiment status, completeness, redacted URLs, VUs,
+duration, interval, metrics), the config, the outcome and a one-sentence summary, the window
+selection, the ranked findings, every assessment, and the limitations. The command's exit codes
+are 0 (investigated, including abstention), 2 (usage), and 3 (bad input or write failure); a
+failure is written to `-out` too, replacing any earlier file atomically. The console summary is
+capped at 10 findings, 10 inconclusive signals, and 10 excluded windows, with long lines
+shortened.
+
+### Redaction
+
+Source URLs go through `workload.RedactURL`; methods, routes, labels, reasons, and metric names
+copied from the analysis go through `workload.RedactText`, control characters are replaced, and
+length is capped. A recorded analysis error is redacted before it is quoted. Decode errors that
+would quote a rejected value (a malformed timestamp or number) are replaced by a generic message.
+
+### Testing
+
+Engine tests build analyses from a compact builder (windows of given lengths and phases, routes
+with request counts by status class, p95 estimates with bucket bounds, and unavailable signals)
+and always round-trip them through `DecodeAnalysis`. They cover every finding type with
+hand-calculated values (p95 0.8 ms to 2 ms is +150%, three times the threshold; 1000 to 600
+requests/s is -40%, 1.33 times; 0% to 6% 5xx is six times), p95 rises inside one bucket
+(inconclusive), noisy and unequal-length windows, zero baselines, error spikes without latency
+increases, 4xx-only increases (no finding), non-robust error increases (factor, too few errors),
+multiple routes and their ranking, determinism under shuffled route order, stable IDs, excluded
+start, end, and gap windows with partial telemetry, counter resets with warning references,
+changed buckets, too few observations, a p95 in the `+Inf` bucket, odd window counts, too few
+windows, no routes or windows, contradictions, credential redaction, and a check that no output
+claims a cause, significance, or confidence. Every evidence pointer in the latency and throughput
+tests is resolved in the analysis file and checked against its value. Decode tests use the
+analysis golden file and 27 kinds of inconsistency. Mutating the engine to skip the bucket
+separation check or to compare windows that span the workload's start or end makes tests fail.
+
+Command tests include an offline end-to-end run: the synthetic experiment fixture is analysed with
+`analysis.ReadExperiment` and `analysis.Analyze` (checked to equal the analysis golden file),
+saved as `ruptiq-analyze` saves it, and investigated. With the defaults every route abstains (two
+comparable windows); with `-min-windows 1` GET shows a throughput degradation from 2976.2 to
+2026.8 requests/s, and its evidence pointers are resolved to windows 2 and 3 of the saved analysis
+(3000 and 3020 requests). Other command tests cover the JSON schema (decoded with unknown fields
+disallowed), every bad-input class with the error report replacing an older file, usage errors,
+an unwritable output, and redaction. No test needs k6, Docker, or a running service.
+
+### Limitations
+
+Only earlier and later windows of one experiment are compared, so short experiments abstain and a
+regression between versions cannot be shown. Only degradation is looked for. The thresholds are
+conservative rules of thumb, not calibrated to any service, and a gradual change that never
+separates the halves is reported as inconclusive. There are no resource, dependency, or network
+measurements, so causes are never identified, and client-side measurements are not used. The
+engine has only been run on synthetic data.
 
 ## Checkout demo: Order Service
 
@@ -930,10 +1106,11 @@ number of created reservations, the stock-read count, and that no IDs appear.
 **What Core still needs** to use this automatically: Core's `TelemetryReader` can read this
 endpoint, and the experiment coordinator samples it before, during, and after a k6 run, with the
 metrics address configured separately from the URL under load (see "Experiment: workload with
-telemetry sampling"). Still missing are conversion of counters and
-histograms into per-run rates and estimated percentiles, including counter resets on restart;
-storage of telemetry with each run (`RunStore`); an `Investigator` that relates client-side and
-server-side numbers; and metrics from the Order and Payment Services.
+telemetry sampling"). Counters and histograms are turned into per-window rates and estimated
+percentiles, with counter resets detected (see "Signal extraction: analysing a saved
+experiment"), and a first `Investigator` ranks changes between windows (see "Investigator:
+evidence-driven findings"). Still missing are storage of telemetry with each run (`RunStore`);
+relating client-side and server-side numbers; and metrics from the Order and Payment Services.
 
 ### Seed data and limitations
 
@@ -1342,6 +1519,10 @@ checkout works across the three containers.
 - `cmd/ruptiq-analyze`, `internal/analysis`: offline signal extraction from a saved experiment
   report: per-window request rates, 5xx shares, and histogram p95 estimates, with evidence
   references, warnings for missing or reset series, and a versioned JSON report.
+- `cmd/ruptiq-investigate`, `internal/investigation`: the first `Investigator`, offline and
+  deterministic: ranked observations of 5xx increases and latency and throughput degradation
+  between earlier and later windows of one experiment, with evidence references, contradictions,
+  limitations, and validation experiments, or an explicit abstention.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -1355,7 +1536,7 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-`Investigator` (diagnosis), `RunStore` (run history), comparison of experiments, load ramps, cancellation and compensation across services, persistence,
+Root-cause diagnosis, `RunStore` (run history), comparison of experiments, load ramps, cancellation and compensation across services, persistence,
 target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
 tracing are not implemented.
 
