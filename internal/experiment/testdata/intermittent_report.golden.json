@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "status": "incomplete",
+  "reasons": [
+    "telemetry is partial",
+    "1 of 5 scrapes failed"
+  ],
+  "started_at": "2026-11-06T12:00:00Z",
+  "finished_at": "2026-11-06T12:00:03.25Z",
+  "config": {
+    "target_url": "http://127.0.0.1:8082/inventory/LAPTOP-001",
+    "vus": 2,
+    "duration_seconds": 3,
+    "max_failure_rate": 0,
+    "metrics_url": "http://127.0.0.1:8082/metrics",
+    "sample_interval_seconds": 1,
+    "max_samples": 1000,
+    "max_telemetry_bytes": 33554432,
+    "timeout_seconds": 63
+  },
+  "workload": {
+    "result": {
+      "runner": "k6",
+      "runner_version": "2.3.0",
+      "target_url": "http://127.0.0.1:8082/inventory/LAPTOP-001",
+      "vus": 2,
+      "configured_duration_seconds": 3,
+      "started_at": "2026-11-06T12:00:00.01Z",
+      "finished_at": "2026-11-06T12:00:03Z",
+      "metrics": {
+        "duration_seconds": 5.0004,
+        "http_requests": 20000,
+        "failed_requests": 0,
+        "failure_rate": 0,
+        "requests_per_second": 3999.680025597952,
+        "latency_ms": {
+          "avg": 0.42,
+          "min": 0.1,
+          "p50": 0.53,
+          "p90": 0.62,
+          "p95": 0.68,
+          "max": 8.57
+        }
+      }
+    },
+    "verdict": {
+      "passed": true,
+      "max_failure_rate": 0
+    }
+  },
+  "telemetry": {
+    "completeness": "partial",
+    "completeness_reasons": [
+      "1 of 5 scrapes failed"
+    ],
+    "attempts": 5,
+    "succeeded": 4,
+    "failed": 1,
+    "sample_limit_reached": false,
+    "retained_bytes": 1049,
+    "retention_limit_reached": false,
+    "samples": [
+      {
+        "sequence": 1,
+        "phase": "before_workload",
+        "scraped_at": "2026-11-06T12:00:00Z",
+        "offset_seconds": 0,
+        "scrape_duration_seconds": 0.002,
+        "families": [
+          {
+            "name": "app_requests_total",
+            "help": "Requests handled.",
+            "type": "counter",
+            "series": [
+              {
+                "labels": {
+                  "code": "200"
+                },
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "sequence": 2,
+        "phase": "during_workload",
+        "scraped_at": "2026-11-06T12:00:01Z",
+        "offset_seconds": 1,
+        "scrape_duration_seconds": 0.002,
+        "families": [
+          {
+            "name": "app_requests_total",
+            "help": "Requests handled.",
+            "type": "counter",
+            "series": [
+              {
+                "labels": {
+                  "code": "200"
+                },
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "sequence": 4,
+        "phase": "during_workload",
+        "scraped_at": "2026-11-06T12:00:03Z",
+        "offset_seconds": 3,
+        "scrape_duration_seconds": 0.002,
+        "families": [
+          {
+            "name": "app_requests_total",
+            "help": "Requests handled.",
+            "type": "counter",
+            "series": [
+              {
+                "labels": {
+                  "code": "200"
+                },
+                "value": 4
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "sequence": 5,
+        "phase": "after_workload",
+        "scraped_at": "2026-11-06T12:00:03.25Z",
+        "offset_seconds": 3.25,
+        "scrape_duration_seconds": 0.002,
+        "families": [
+          {
+            "name": "app_requests_total",
+            "help": "Requests handled.",
+            "type": "counter",
+            "series": [
+              {
+                "labels": {
+                  "code": "200"
+                },
+                "value": 5
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "errors": [
+      {
+        "sequence": 3,
+        "phase": "during_workload",
+        "attempted_at": "2026-11-06T12:00:02Z",
+        "offset_seconds": 2,
+        "error": "metrics request failed: GET http://127.0.0.1:8082/metrics: connection refused"
+      }
+    ],
+    "not_retained": []
+  }
+}

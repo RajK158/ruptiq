@@ -1,0 +1,16 @@
+Ruptiq experiment report
+  Status:          INCOMPLETE
+                   - telemetry is partial
+                   - 1 of 5 scrapes failed
+  Target:          http://127.0.0.1:8082/inventory/LAPTOP-001
+  Metrics:         http://127.0.0.1:8082/metrics (every 1s)
+  Started:         2026-11-06T12:00:00.000Z (took 3.2s)
+  Workload:        k6 v2.3.0, 2 virtual users, 3s configured, 5.00s measured
+  HTTP requests:   20000 (3999.7 per second), 0 failed (0.00%)
+  Latency (ms):    avg 0.420   p50 0.530   p95 0.680   max 8.570
+  Workload result: passed (failure rate at most 0.00%)
+  Telemetry:       partial: 4 of 5 scrapes succeeded; 4 samples kept (1 before, 2 during, 1 after the workload)
+                   - 1 of 5 scrapes failed
+  Retained:        1049 of 33554432 bytes of sample data
+  Samples:         #1 at +0.0s to #5 at +3.2s (metric families in the last: 1)
+  Scrape error:    #3 at +2.0s (while the workload was running): metrics request failed: GET http://127.0.0.1:8082/metrics: connection refused

@@ -25,15 +25,18 @@ The first usable version is planned to cover:
 Item 1 has started: Ruptiq can run a short HTTP GET load test with k6, save its results as a JSON
 file, and compare two saved results, but has no run history yet. Item 2 has started: the Inventory
 Service exposes Prometheus metrics, and Ruptiq Core can read one snapshot of any Prometheus
-endpoint, but does not yet collect telemetry while a load test runs. Item 3 does not exist yet; item 4 is in progress (see below). See
+endpoint or sample one periodically while a k6 load test runs, saving both in one experiment
+report. It does not yet turn the samples into rates or percentiles. Item 3 does not exist yet; item
+4 is in progress (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
 
 Ruptiq Core has a health-check server; `ruptiq-run`, a command that runs one HTTP GET load test
 with [k6](https://k6.io) against any URL and reports what k6 measured; `ruptiq-compare`, which
-compares two saved `ruptiq-run` results offline; and `ruptiq-telemetry`, which reads one snapshot
-of a target's Prometheus metrics. The checkout demo has three
+compares two saved `ruptiq-run` results offline; `ruptiq-telemetry`, which reads one snapshot
+of a target's Prometheus metrics; and `ruptiq-experiment`, which runs a k6 load test while
+sampling a Prometheus endpoint and saves both in one report. The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
@@ -57,9 +60,10 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Offline comparison of two saved runs (`ruptiq-compare`) | Done; descriptive only (no significance testing, no diagnosis); unit tested, and run on real saved k6 results (see below) |
 | Inventory Service Prometheus metrics (`GET /metrics`) | Done; unit tested and inspected on a running service. Smoke-test checks added; they first run in CI on the pull request (Docker is not installed on the development machine) |
 | Prometheus telemetry reader (`ruptiq-telemetry`, one snapshot) | Done; unit tested against local test servers, and run against the real Inventory Service (see below) |
+| Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
-| Continuous telemetry collection during a load test, investigation, run storage, load ramps | Not started |
+| Rates and percentiles from telemetry samples, investigation, run storage, load ramps | Not started |
 
 ## Requirements
 
@@ -71,8 +75,9 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
   checksum.
 - Optional, for the containerized checkout demo: Docker with the Compose plugin (Docker Desktop
   on Windows or macOS, or Docker Engine with `docker compose` on Linux).
-- Optional, for load tests with `ruptiq-run`: [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
-  (developed against v2.3.0). Ruptiq's tests do not need it.
+- Optional, for load tests with `ruptiq-run` and `ruptiq-experiment`:
+  [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) (developed against v2.3.0). Ruptiq's
+  tests do not need it.
 
 ## Run Ruptiq API locally
 
@@ -234,9 +239,9 @@ times, and the metrics above, using the same names), and `verdict`; or `error` a
 
 - One workload only: GET requests to one URL at a constant number of virtual users. No ramps, no
   other methods or request bodies, no custom headers, no think time between requests.
-- Results are client-side only (what k6 saw). Telemetry from the target is not collected during
-  the run (`ruptiq-telemetry` reads one snapshot, separately), and there is no investigation and no
-  run history.
+- Results are client-side only (what k6 saw). To also sample the target's Prometheus metrics
+  during the run, use [`ruptiq-experiment`](#run-an-experiment-ruptiq-experiment). There is no
+  investigation and no run history.
 - One k6 process on the local machine; no distributed load generation.
 - Because the whole query string is hidden, reports cannot tell apart runs that differ only in
   their query. Secrets in the URL path itself (for example `/api/<token>/items`) are not
@@ -385,7 +390,8 @@ does not apply, with the reason in `change_percent_note`.
 `ruptiq-telemetry` reads **one snapshot** of a target's metrics from any HTTP endpoint that serves
 the Prometheus text format, prints a short summary, and can save everything as JSON. It works with
 any Prometheus endpoint; it does not expect particular metric names. It does not run a load test,
-and it does not collect telemetry over time: one command, one request.
+and it does not collect telemetry over time: one command, one request. (`ruptiq-experiment` uses
+the same reader to sample during a load test.)
 
 ```powershell
 go run ./cmd/ruptiq-telemetry -url http://localhost:8082/metrics -out snapshot.json
@@ -503,7 +509,8 @@ ruptiq-telemetry: no snapshot: metrics request failed: GET http://127.0.0.1:1808
 
 ### Limitations
 
-- One snapshot per command. Nothing samples repeatedly, and nothing runs alongside `ruptiq-run`.
+- One snapshot per command. To sample while a load test runs, use
+  [`ruptiq-experiment`](#run-an-experiment-ruptiq-experiment).
 - Only the Prometheus text format (version 0.0.4). OpenMetrics and protobuf responses are
   rejected. Native histograms are not supported (they are not part of the text format).
 - Histogram checks rely on the `+Inf` bucket: without one, bucket counts are not compared with
@@ -512,6 +519,234 @@ ruptiq-telemetry: no snapshot: metrics request failed: GET http://127.0.0.1:1808
   authentication only, through the URL.
 - Values are recorded as exposed. Nothing is converted into rates or percentiles, and counters are
   not compared between snapshots.
+
+## Run an experiment (`ruptiq-experiment`)
+
+`ruptiq-experiment` runs one HTTP GET load test with k6 (exactly as `ruptiq-run` does) and, while
+it runs, reads a Prometheus metrics endpoint at a fixed interval (with the same reader as
+`ruptiq-telemetry`). It saves k6's client-side results and every timestamped snapshot in one JSON
+report. The load target and the metrics endpoint are configured separately; it works with any
+HTTP target and any Prometheus text-format endpoint.
+
+### Example: the Inventory Service
+
+Start the Inventory Service (see [Start it](#start-it-1)), install k6 (see
+[Install k6](#install-k6)), then:
+
+```sh
+go run ./cmd/ruptiq-experiment -url http://localhost:8082/inventory/LAPTOP-001 -metrics-url http://localhost:8082/metrics -vus 2 -duration 5s -interval 1s -out experiment.json
+```
+
+Real output from a run against the Inventory Service on port 18082 with the portable k6 v2.3.0
+for Windows (`-k6` pointed at it):
+
+```text
+Running 2 virtual users for 5s against http://127.0.0.1:18082/inventory/LAPTOP-001,
+sampling http://127.0.0.1:18082/metrics every 1s (timeout 1m5s)...
+
+Ruptiq experiment report
+  Status:          PASSED
+  Target:          http://127.0.0.1:18082/inventory/LAPTOP-001
+  Metrics:         http://127.0.0.1:18082/metrics (every 1s)
+  Started:         2026-11-06T13:03:52.942Z (took 5.1s)
+  Workload:        k6 v2.3.0, 2 virtual users, 5s configured, 5.00s measured
+  HTTP requests:   17550 (3509.6 per second), 0 failed (0.00%)
+  Latency (ms):    avg 0.482   p50 0.531   p95 0.920   max 25.932
+  Workload result: passed (failure rate at most 0.00%)
+  Telemetry:       complete: 7 of 7 scrapes succeeded (1 before, 5 during, 1 after the workload)
+  Samples:         #1 at +0.0s to #7 at +5.1s (metric families in the last: 5)
+
+Report written to experiment.json
+```
+
+The service's own counter `inventory_http_requests_total{method="GET",route="/inventory/{sku}",status="200"}`
+in the saved samples, in order: absent before the load, then 3620, 7496, 11433, 14497, and 17352
+during it, and 17550 after it, the same number of requests k6 reported. (One more request, under
+`route="unmatched"`, was a manual check made before the experiment.) The in-flight gauge read 1 or 2
+during the load and 0 after it. The report file was 56 KB.
+
+### Options
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-url` | (required) | Target URL that k6 sends GET requests to. |
+| `-metrics-url` | (required) | Prometheus metrics endpoint to sample. |
+| `-vus` | `2` | Concurrent virtual users, 1 to 1000. |
+| `-duration` | `5s` | How long to apply load, whole seconds from `1s` to `1h`. |
+| `-interval` | `1s` | Time between scrapes while the load runs, `100ms` to `1m`, and not longer than `-duration`. |
+| `-max-samples` | `1000` | Most scrapes in one experiment (3 to 10000), including the one before and the one after the load. Must cover `-duration` / `-interval` + 2; k6 usually runs a little longer than `-duration`, so leave room (see below). |
+| `-max-telemetry-bytes` | `33554432` (32 MiB) | Retention budget: the most sample data (measured as JSON) kept from one experiment, 1 KiB to 1 GiB. |
+| `-timeout` | duration + 60s | Hard limit for the whole experiment. Must be longer than `-duration`. |
+| `-scrape-timeout` | `5s` | Maximum time for one scrape. |
+| `-k6` | `RUPTIQ_K6_PATH`, else `k6` | k6 executable name or path. |
+| `-max-failure-rate` | `0` | Highest failure rate (0 to 1) for the load test to pass. |
+| `-out` | (none) | Write the experiment report as JSON to this file. |
+
+### How sampling works
+
+1. One scrape **before** the workload starts (the baseline).
+2. k6 starts; one scrape every `-interval` **during** the workload. Scrapes are made one at a time,
+   so they never overlap. Go's ticker keeps at most one pending tick: if a scrape takes longer than
+   the interval, the next scrape starts as soon as it finishes, and any further ticks that fell due
+   meanwhile are dropped.
+3. When k6 returns, sampling stops (a scrape in progress is allowed to finish) and one more scrape
+   is made **after** the workload.
+
+Each scrape attempt gets the next sequence number and is recorded exactly once: as a sample, as an
+error, or (when the retention budget is reached) as "not retained". Gaps in the samples' sequence
+numbers are therefore explained by the other two lists. A scrape interrupted because the experiment
+was cancelled or timed out is not counted.
+
+**Limits.** `-max-samples` caps scrape attempts. The check that it covers `-duration` /
+`-interval` + 2 assumes the workload runs for exactly `-duration`; k6 takes a little longer (start-up
+and shutdown), and a workload that runs much longer than configured can still reach the cap. Then
+sampling stops early, keeping the last attempt for the scrape after the workload, and the telemetry
+is `partial`. `-max-telemetry-bytes` caps the sample data kept: each successful scrape is measured as
+the JSON it adds to the report, and the first one that does not fit in what is left is not kept
+(only its sequence, phase, time, and size are recorded). Sampling then stops, no scrape is made after
+the workload, the samples already kept stay, and the telemetry is `partial`. The load test is never
+stopped or failed by either limit.
+
+**What "timestamped" means.** Every sample has `scraped_at` (when the request to the metrics
+endpoint was sent) and `offset_seconds` (since the experiment started). The values in a sample are
+the endpoint's values at about that moment. They are not tied to individual k6 requests: k6
+measures each request on the client, the service counts it when its handler returns, and scrapes
+happen on their own schedule. "During the workload" means while the k6 process was running,
+including its start-up and shutdown, so the first and last of those samples can see little load.
+Compare samples by their timestamps, not as an exact per-request match.
+
+### The report
+
+`schema_version` 1. Shortened example from the run above, which was made before the retention
+budget was added; current reports also have `config.max_telemetry_bytes` and
+`telemetry.retained_bytes`, `retention_limit_reached`, and `not_retained` (described below). The
+real file has every family in every sample:
+
+```json
+{
+  "schema_version": 1,
+  "status": "passed",
+  "started_at": "2026-11-06T13:03:52.9420917Z",
+  "finished_at": "2026-11-06T13:03:58.0617214Z",
+  "config": {
+    "target_url": "http://127.0.0.1:18082/inventory/LAPTOP-001",
+    "vus": 2, "duration_seconds": 5, "max_failure_rate": 0,
+    "metrics_url": "http://127.0.0.1:18082/metrics",
+    "sample_interval_seconds": 1, "max_samples": 1000, "timeout_seconds": 65
+  },
+  "workload": {
+    "result": { "runner": "k6", "runner_version": "2.3.0", "metrics": { "http_requests": 17550, "...": "..." } },
+    "verdict": { "passed": true, "max_failure_rate": 0 }
+  },
+  "telemetry": {
+    "completeness": "complete",
+    "attempts": 7, "succeeded": 7, "failed": 0, "sample_limit_reached": false,
+    "samples": [
+      {
+        "sequence": 1, "phase": "before_workload",
+        "scraped_at": "2026-11-06T13:03:52.9420917Z", "offset_seconds": 0,
+        "scrape_duration_seconds": 0.0048,
+        "families": [ { "name": "inventory_http_requests_total", "type": "counter", "series": [ "..." ] } ]
+      }
+    ],
+    "errors": []
+  }
+}
+```
+
+- `status` is the overall outcome (see below); `reasons` explains any status other than `passed`.
+- `config` holds the settings, with both URLs redacted. Each URL is stored once, not per sample.
+- `workload` holds either k6's `result` (the same structure as a `ruptiq-run` report) or an
+  `error`, plus the pass/fail `verdict`.
+- `telemetry.samples` hold the families exactly as `ruptiq-telemetry` reads them (names, labels,
+  values, histogram buckets), with `sequence`, `phase` (`before_workload`, `during_workload`, or
+  `after_workload`), `scraped_at`, `offset_seconds`, and `scrape_duration_seconds`.
+- `telemetry.errors` hold failed scrapes: `sequence`, `phase`, `attempted_at`, `offset_seconds`,
+  and the redacted `error`. No values are recorded for them.
+- `telemetry.retained_bytes` is the compact JSON size of the kept samples, counted against
+  `config.max_telemetry_bytes`. `telemetry.retention_limit_reached` is `true` when a successful
+  scrape did not fit; that scrape is listed in `telemetry.not_retained` (`sequence`, `phase`,
+  `scraped_at`, `offset_seconds`, `size_bytes`) without its values.
+- Counts: `attempts` = `succeeded` + `failed`, and `succeeded` = kept samples + not retained.
+  `samples`, `errors`, and `not_retained` are always arrays.
+
+### Status, partial telemetry, and exit codes
+
+Telemetry is `complete` only if every scrape succeeded and was kept, there is at least one sample
+before, during, and after the workload, and neither the sample limit nor the retention budget was
+reached. Otherwise it is `partial` (some samples kept) or `none` (no samples kept), and
+`completeness_reasons` says why. Telemetry failures and limits never stop the load test; they are
+recorded and make the experiment `incomplete`.
+
+| Status | Meaning | Exit |
+| --- | --- | --- |
+| `passed` | The load test passed and the telemetry is complete. | 0 |
+| `failed` | The load test completed but failed its pass criteria (for example, failed requests). | 1 |
+| (none) | Invalid arguments; nothing was run and no report was written. | 2 |
+| `error` | The load test could not be completed (k6 missing, k6 failed, unreadable results). Also exit 3 if the report file cannot be written. | 3 |
+| `incomplete` | The load test passed, but the telemetry is partial or missing. | 4 |
+| `cancelled`, `timed_out` | The experiment was stopped by Ctrl+C or by `-timeout`. | 5 |
+
+The status is decided in that order of precedence: a stopped experiment is never judged on its
+partial results, and `incomplete` is reported only when the load test itself passed (the
+telemetry's completeness is still in the report for the other outcomes). Only `passed` is a pass.
+
+Real examples against the Inventory Service: with `-metrics-url http://127.0.0.1:18082/nope`, the
+load test passed but all 4 scrapes failed (`404 Not Found`), so the status was `incomplete`
+(exit 4) with 4 recorded errors and no samples. With `-duration 3s -timeout 3001ms`, k6 was stopped
+at the deadline: status `timed_out` (exit 5), workload error `k6 run stopped: context deadline
+exceeded`, and telemetry `partial` with 3 samples and "no sample after the workload (the experiment
+was stopped)". No k6 process or temporary directory was left behind.
+
+The retention budget, against the same service (whose counters had grown from earlier runs): a 5s
+experiment with the default budget kept 7 samples, `retained_bytes` 14622, in a 35892-byte report
+file (the file is indented, so it is larger than the compact JSON the budget counts). With
+`-max-telemetry-bytes 8192`, the load test passed (10606 requests) but the status was `incomplete`
+(exit 4):
+
+```text
+  Telemetry:       partial: 4 of 4 scrapes succeeded; 3 samples kept (1 before, 2 during, 0 after the workload)
+                   - telemetry retention budget of 8192 bytes reached: sample #4 (2317 bytes) did not fit after 6940 bytes were kept; it was not kept and sampling stopped
+                   - no sample after the workload (the retention budget was reached)
+  Retained:        6940 of 8192 bytes of sample data
+```
+
+With `-out`, the report is written for every outcome except invalid arguments, through a temporary
+file and a rename, so an old successful report is replaced and never mistaken for the latest
+experiment.
+
+### Safety
+
+- The user name, password, and whole query string of both URLs are replaced by `xxxxx` in the
+  console output and the report, including error messages. The requests themselves use the
+  complete URLs. (Checked with real runs: no credential or query value appeared in the output or
+  file.)
+- k6 is run by the same adapter as `ruptiq-run`: no shell, the target URL passed through the
+  environment, and its temporary directory removed afterwards.
+- Memory use is limited: the kept samples are bounded by `-max-telemetry-bytes` (default 32 MiB),
+  scrape attempts by `-max-samples`, each response by 16 MiB, and only a short summary is printed (at
+  most 5 scrape errors, long messages shortened). The budget counts the samples' JSON size, which
+  approximates their memory use; it is not a hard limit on the process's memory (see Limitations).
+
+### Limitations
+
+- One HTTP GET workload and one Prometheus text-format endpoint per experiment.
+- Values are recorded as exposed. Nothing computes counter rates, differences between samples, or
+  histogram percentiles yet, and counter resets (a restarted service) are not detected.
+- Sampling is periodic, not continuous: anything shorter than the interval can fall between two
+  samples, and the scrapes add a small load of their own to the target. Scrape timing follows the
+  local clock and Go's ticker, so intervals are approximate (for example +1.006 s, +2.005 s).
+- Timestamps come from the machine running Ruptiq. The target's own clock is not used, so a
+  remote target's clock skew does not matter, but network delay to the metrics endpoint does.
+- The whole report is kept in memory until the experiment ends. Nothing is stored in a database
+  or compared between experiments; `ruptiq-compare` reads only `ruptiq-run` reports.
+- The retention budget is an approximation, not a memory guarantee. Go's in-memory form of a
+  sample (maps, slices, strings, pointers) is usually larger than its JSON. On top of the kept
+  samples, each scrape briefly holds its response (up to 16 MiB) and parsed snapshot, and measuring
+  a sample briefly makes one JSON copy of it; writing the report makes one JSON copy of everything.
+  The small "not retained" and error records are not counted.
+- Once the budget is reached, sampling stops for the rest of the experiment, including the scrape
+  after the workload, even if later snapshots would have been smaller.
 
 ## Checkout demo with Docker Compose
 
@@ -1219,12 +1454,11 @@ Neither number replaces the other. On Windows, the clock behind these timings ca
 requests as 0 seconds; this was seen when running the service locally.
 
 **Reading it with Ruptiq Core:** `ruptiq-telemetry` reads one snapshot of these metrics (see
-[Read a telemetry snapshot](#read-a-telemetry-snapshot-ruptiq-telemetry)). What Ruptiq Core still
-needs before it can collect and investigate this telemetry automatically:
+[Read a telemetry snapshot](#read-a-telemetry-snapshot-ruptiq-telemetry)), and
+`ruptiq-experiment` samples them before, during, and after a k6 load test (see
+[Run an experiment](#run-an-experiment-ruptiq-experiment)). What Ruptiq Core still needs before it
+can investigate this telemetry automatically:
 
-- Repeated reads before, during, and after a run, with timestamps aligned to the run (the reader
-  takes one snapshot per call today).
-- A way to tell Ruptiq a target's metrics address, separately from the URL under load.
 - Turning counters and histograms into per-run rates and percentiles (differences between scrapes,
   handling counter resets when the service restarts). Histogram percentiles are estimates bounded
   by the bucket edges.
@@ -1439,7 +1673,8 @@ go test -race ./...
 formatted.
 
 None of the tests need k6, Docker, or network access: the k6 adapter is tested against a fake k6
-program (the test binary itself) and saved k6 summaries.
+program (the test binary itself) and saved k6 summaries, and the experiment coordinator against
+fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker.
 
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
@@ -1459,6 +1694,7 @@ cmd/ruptiq-api/                          Ruptiq Core: program entry point
 cmd/ruptiq-run/                          Ruptiq Core: load test command (flags, report, JSON results)
 cmd/ruptiq-compare/                      Ruptiq Core: run comparison command (flags, files, exit codes)
 cmd/ruptiq-telemetry/                    Ruptiq Core: telemetry snapshot command (flags, JSON file)
+cmd/ruptiq-experiment/                   Ruptiq Core: experiment command (flags, exit codes, JSON file)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
@@ -1466,6 +1702,8 @@ internal/comparison/                     Ruptiq Core: reads and validates saved 
                                          console output
 internal/telemetry/                      Ruptiq Core: TelemetryReader boundary, snapshot model, the
                                          Prometheus HTTP reader, console summary
+internal/experiment/                     Ruptiq Core: experiment coordinator (workload plus periodic
+                                         telemetry sampling), report model, console summary
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
