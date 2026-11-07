@@ -5,9 +5,10 @@
 > below), offline comparison of two saved runs (see "Run comparison"), and three checkout demo
 > services (Order, Inventory, and Payment), of which the Inventory Service exposes Prometheus
 > metrics (see "Inventory Service telemetry"), and a first `TelemetryReader` that reads one
-> snapshot from a Prometheus endpoint (see "TelemetryReader: Prometheus reader").
-> `Investigator` and `RunStore` do not exist in code yet, and nothing collects telemetry during a
-> run. This document records the intended
+> snapshot from a Prometheus endpoint (see "TelemetryReader: Prometheus reader"), and an
+> experiment coordinator that samples that reader periodically while the k6 workload runs (see
+> "Experiment: workload with telemetry sampling"). `Investigator` and `RunStore` do not exist in
+> code yet. This document records the intended
 > direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
@@ -66,8 +67,9 @@ error counts. This is how Ruptiq sees *inside* the target. Each kind of target c
 differently, so this is a main place where adapters plug in.
 
 A first version exists: it reads one snapshot from any Prometheus text-format endpoint, such as
-the Inventory Service's `/metrics` (see "TelemetryReader: Prometheus reader" below). Collecting
-snapshots while a workload runs does not exist yet.
+the Inventory Service's `/metrics` (see "TelemetryReader: Prometheus reader" below). The
+experiment coordinator calls it periodically while a workload runs (see "Experiment: workload with
+telemetry sampling").
 
 ### Investigator
 
@@ -83,8 +85,9 @@ runs over time and re-run an investigation on old data. The storage technology i
 ## How the pieces work together (planned)
 
 1. A run is configured against a target.
-2. `WorkloadRunner` applies load while `TelemetryReader` collects telemetry.
-3. The results are saved through `RunStore`.
+2. `WorkloadRunner` applies load while `TelemetryReader` collects telemetry. (Implemented by the
+   experiment coordinator for one workload and one Prometheus endpoint.)
+3. The results are saved through `RunStore`. (Today: one JSON report file per experiment.)
 4. `Investigator` reads the saved run and produces findings.
 
 ## WorkloadRunner: k6 adapter
@@ -417,10 +420,160 @@ gauges.
 
 ### Limitations
 
-One snapshot per call; nothing samples over time or runs beside `ruptiq-run`. Only the Prometheus
+One snapshot per call; sampling over time is the experiment coordinator's job. Only the Prometheus
 text format; no OpenMetrics, protobuf, or native histograms. Basic authentication through the URL
 only; no bearer tokens or TLS settings. No conversion to rates or percentiles, and no comparison of
 snapshots.
+
+## Experiment: workload with telemetry sampling
+
+`internal/experiment` runs one workload while sampling telemetry, and `cmd/ruptiq-experiment` is
+its command. It is the first place where `WorkloadRunner` and `TelemetryReader` work together. It
+depends only on their interfaces (`workload.Runner`, `telemetry.Reader`); the command plugs in the
+k6 runner and the Prometheus reader. It does not change or duplicate either: k6 is run exactly as
+`ruptiq-run` runs it.
+
+```text
+internal/experiment/
+  experiment.go     Config, defaults and validation, the Report model, statuses
+  coordinator.go    Coordinator: baseline scrape, sampler goroutine, final scrape, judging
+  render.go         WriteSummary (console)
+cmd/ruptiq-experiment/
+  main.go           flags, exit codes, atomic JSON file
+```
+
+### How an experiment runs
+
+`Coordinator.Run(ctx, cfg)` validates the config (after defaults), then:
+
+1. Applies the experiment timeout to `ctx`.
+2. Makes one scrape **before** the workload.
+3. Starts one sampler goroutine, which waits for a tick (every `Interval`), scrapes, and repeats.
+   The same goroutine makes every scrape, so scrapes never overlap. A `time.Ticker` keeps at most
+   one pending tick: after a scrape longer than the interval, the next scrape starts as soon as it
+   finishes, and further ticks that fell due meanwhile are dropped.
+4. Runs the workload on the calling goroutine. Telemetry failures and limits never stop it.
+5. When the workload returns, closes a stop channel and waits for the sampler to exit. A scrape in
+   progress finishes (bounded by the reader's timeout); a tick and stop arriving together resolve
+   to stop. The ticker is stopped by the sampler on its way out.
+6. Unless the context is done or the retention budget was reached, makes one scrape **after** the
+   workload.
+7. Builds the report and judges it.
+
+`Run` returns only after the sampler goroutine has exited, so nothing outlives it. The collected
+data has one owner at a time: the calling goroutine before step 3 and after step 5, the sampler in
+between, with the goroutine start and the channel close as the hand-offs, so no lock is needed.
+
+**Bounds.** `MaxSamples` (default 1000, at most 10000) bounds scrape attempts, successful or not.
+The sampler stops one short of it, keeping the last attempt for the scrape after the workload, and
+records `sample_limit_reached`. Validation rejects a config whose expected count
+(`duration / interval + 2`) exceeds `MaxSamples`, but that count assumes the workload runs for
+exactly its configured duration. k6 runs a little longer (start-up and shutdown), and a workload
+that runs much longer than configured can still reach the limit; the telemetry is then `partial`.
+Each response is bounded by the reader (16 MiB), and the console shows at most 5 scrape errors.
+
+**Retention budget.** `MaxTelemetryBytes` (default 32 MiB, 1 KiB to 1 GiB) bounds the sample data
+kept, and it is enforced as each scrape completes, not when the report is written. Each successful
+scrape is measured as the compact JSON of the `Sample` it would add (families, labels, values,
+buckets, and its timestamps), so the budget counts actual metric data, not a number of snapshots.
+If the sample fits in what is left, it is kept and its size added to `retained_bytes`. If it does
+not, including a single snapshot larger than the whole budget, it is recorded in `not_retained`
+(sequence, phase, time, and size, without values), `retention_limit_reached` is set, the sampler
+exits at its next check, and no scrape is made after the workload, because nothing more could be
+kept. Samples already kept stay, and the workload is unaffected. The telemetry becomes `partial` (or
+`none` if nothing was kept), with a reason naming the budget, the sample, and the bytes kept, so the
+experiment can be at best `incomplete`.
+
+The budget is an approximation of memory, not a guarantee. A sample's Go representation (maps,
+slices, strings, pointers) is usually larger than its JSON. Beyond the kept samples, each scrape
+transiently holds its response body (up to 16 MiB), the parsed snapshot, and one JSON copy for
+measuring it, and writing the report makes one (indented, so larger) JSON copy of everything. The
+`errors` and `not_retained` records are small and bounded by `MaxSamples`, and are not counted.
+
+**Scrape accounting.** Every attempt gets the next sequence number and becomes exactly one sample,
+one error, or one not-retained record, so `attempts = succeeded + failed` and
+`succeeded = len(samples) + len(not_retained)`. A scrape that fails because the experiment's
+context ended (cancellation or timeout) is not counted: that is not the endpoint's failure. Errors
+are redacted again with the metrics URL before they are stored, in addition to the reader's own
+redaction.
+
+### Partial-failure policy
+
+Telemetry completeness:
+
+- `complete`: every attempt succeeded and was kept; at least one sample before, during, and after
+  the workload; neither the sample limit nor the retention budget was reached.
+- `partial`: at least one sample kept, but one of those conditions fails. `completeness_reasons`
+  lists each one (for example "2 of 5 scrapes failed", "no sample while the workload was running",
+  or "telemetry retention budget of 8192 bytes reached: sample #4 (2317 bytes) did not fit after
+  6940 bytes were kept; it was not kept and sampling stopped").
+- `none`: no sample kept.
+
+Experiment status, decided in this order:
+
+1. `timed_out` or `cancelled` if the experiment's context ended (by timeout or by the caller).
+   Partial results of a stopped experiment are never judged.
+2. `error` if the workload returned an error (no result).
+3. `failed` if the workload's verdict failed (`workload.Evaluate`, as in `ruptiq-run`).
+4. `incomplete` if the workload passed but the telemetry is not complete.
+5. `passed` otherwise.
+
+So a workload that passed with partial telemetry is never reported as passed, and telemetry
+problems do not hide a workload failure. The report keeps the telemetry, with its completeness, in
+every case.
+
+### Report model
+
+`Report` (`schema_version` 1) holds `status` and `reasons`, start and finish times, the config
+(both URLs redacted with `workload.RedactURL`), the workload outcome (`workload.Result` or an
+error, plus `workload.Verdict`), and the telemetry outcome. Each `Sample` stores the
+`telemetry.Family` list from the snapshot with its sequence, phase, `scraped_at`, offset from the
+start, and scrape duration; the endpoint is not repeated per sample. The workload result's URL is
+replaced by the config's redacted one, so the report does not depend on a runner redacting it.
+The telemetry outcome also records `retained_bytes`, `retention_limit_reached`, and `not_retained`,
+and the config records `max_telemetry_bytes`. `samples`, `errors`, and `not_retained` are always
+arrays, never `null`, so consumers need no special cases.
+
+The samples are aligned to the run only by time. k6 measures requests on the client, the target
+counts them when its handler finishes, and scrapes run on their own ticker; nothing ties a sample
+to particular requests. "During" includes k6 starting and stopping.
+
+### Testing
+
+Coordinator tests use fake runners and readers, a fake clock, and a ticker the test drives by
+hand, so they need no sleeps for ordering. The fake runner sends a tick and waits for the scrape it
+causes before sending the next. They cover a passing experiment (phases, sequences, exact offsets,
+values kept as read), early workload completion, sampling stopping when the workload returns, no
+overlapping scrapes (ticks refused while a scrape is blocked), cancellation (an interrupted scrape
+not counted, no scrape after), timeouts, workload errors, HTTP failures, an unavailable endpoint,
+intermittent failures (sequence gaps), the sample limit, the retention budget (reached after two
+samples by one that fits alone but not in what is left; and a baseline snapshot larger than the
+whole budget, which leaves the report with no sample data), config validation, a golden JSON report
+and summary, a JSON round trip, and redaction of URLs echoed in runner and reader errors. Every
+coordinator test also checks the accounting: each sequence number appears exactly once, the counts
+agree, and `retained_bytes` equals the JSON size of the kept samples. One test uses the real clock
+and ticker with a slow reader. Mutating the code to skip waiting for the sampler, to count
+interrupted scrapes, to ignore the sample limit, or to ignore the retention budget makes tests fail
+(the last by the budget test waiting forever for sampling to stop, caught by the test timeout).
+
+Command tests use a fake runner and the real Prometheus reader against `httptest` servers: every
+exit code, cancellation and timeout, a failed run replacing an older report, a report that cannot
+be written, redaction in stdout, stderr, and the file, usage errors, the k6 path, and the retention
+budget reached with real scrapes (exit 4, no scrapes after it).
+
+A real experiment against the Inventory Service with the portable k6 v2.3.0 is in README.md: 7
+samples, and the service's request counter rising in each, ending at the same number k6 reported.
+
+### Limitations
+
+One HTTP GET workload and one Prometheus endpoint per experiment. Sampling is periodic, so short
+events can fall between samples, and the scrapes themselves add a little load. Timestamps come from
+Ruptiq's machine. Values are stored as exposed: no rates, deltas, percentiles, or counter-reset
+detection yet. The report is held in memory until the end and written to one file; there is no run
+history, and `ruptiq-compare` does not read experiment reports. The retention budget approximates
+memory use rather than capping it, and once it is reached nothing more is sampled, even if later
+snapshots would be smaller; no attempt is made to keep, for example, the scrape after the workload
+by dropping an earlier one.
 
 ## Checkout demo: Order Service
 
@@ -466,7 +619,8 @@ The service has no deliberate delays, failures, or bottlenecks yet. When we add 
 explicit and configurable, and documented here.
 
 Ruptiq does not test the Order Service yet: its endpoints that matter all change state, and the
-workload runner only sends GET requests. Core also has no telemetry reader. Today the service is
+workload runner only sends GET requests, and the Order Service exposes no metrics for Core's
+telemetry reader. Today the service is
 exercised by its own unit tests, the Docker smoke test, and manual requests.
 
 Some code is duplicated between `cmd/ruptiq-api` and the demo services (port parsing, shutdown
@@ -615,10 +769,10 @@ the Prometheus text parser (`expfmt`), so invalid exposition fails the test. It 
 Docker smoke test reads `/metrics` after the checkout scenarios and checks the stock gauges, the
 number of created reservations, the stock-read count, and that no IDs appear.
 
-**What Core still needs** to use this automatically: Core's `TelemetryReader` can read one
-snapshot of this endpoint (see "TelemetryReader: Prometheus reader"); still missing are repeated
-reads around a run with timestamps aligned to it; target configuration
-naming the metrics address separately from the URL under load; conversion of counters and
+**What Core still needs** to use this automatically: Core's `TelemetryReader` can read this
+endpoint, and the experiment coordinator samples it before, during, and after a k6 run, with the
+metrics address configured separately from the URL under load (see "Experiment: workload with
+telemetry sampling"). Still missing are conversion of counters and
 histograms into per-run rates and estimated percentiles, including counter resets on restart;
 storage of telemetry with each run (`RunStore`); an `Investigator` that relates client-side and
 server-side numbers; and metrics from the Order and Payment Services.
@@ -1025,6 +1179,8 @@ checkout works across the three containers.
   reports.
 - `cmd/ruptiq-telemetry`, `internal/telemetry`: the first `TelemetryReader`, reading one snapshot
   from a Prometheus text-format endpoint, with a console summary and JSON output.
+- `cmd/ruptiq-experiment`, `internal/experiment`: one k6 workload with periodic Prometheus
+  sampling before, during, and after it, combined in one versioned JSON report.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -1038,7 +1194,7 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-Telemetry collection during a run (the reader takes single snapshots), `Investigator`,
+Rates, differences, and percentiles computed from telemetry samples, `Investigator`,
 `RunStore` (run history), load ramps, cancellation and compensation across services, persistence,
 target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
 tracing are not implemented.
