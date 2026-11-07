@@ -7,8 +7,9 @@
 > metrics (see "Inventory Service telemetry"), and a first `TelemetryReader` that reads one
 > snapshot from a Prometheus endpoint (see "TelemetryReader: Prometheus reader"), and an
 > experiment coordinator that samples that reader periodically while the k6 workload runs (see
-> "Experiment: workload with telemetry sampling"). `Investigator` and `RunStore` do not exist in
-> code yet. This document records the intended
+> "Experiment: workload with telemetry sampling"), and offline signal extraction from a saved
+> experiment report (see "Signal extraction: analysing a saved experiment"). `Investigator` and
+> `RunStore` do not exist in code yet. This document records the intended
 > direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
@@ -77,6 +78,12 @@ Responsible for analyzing the results of a run (client-side results plus target 
 where the system broke and the likely bottleneck. It works on recorded data and should not drive
 load or talk to the target directly, which keeps it easy to test with saved runs.
 
+It does not exist yet. Its first input does: signal extraction (package `internal/analysis`)
+turns a saved experiment's cumulative metrics into per-window rates, error shares, and latency
+estimates, with references to the samples they came from (see "Signal extraction: analysing a
+saved experiment"). Extraction describes measurements; deciding what they mean is the
+Investigator's job.
+
 ### RunStore
 
 Responsible for saving and loading runs: configuration, results, and telemetry. It lets us compare
@@ -88,7 +95,8 @@ runs over time and re-run an investigation on old data. The storage technology i
 2. `WorkloadRunner` applies load while `TelemetryReader` collects telemetry. (Implemented by the
    experiment coordinator for one workload and one Prometheus endpoint.)
 3. The results are saved through `RunStore`. (Today: one JSON report file per experiment.)
-4. `Investigator` reads the saved run and produces findings.
+4. `Investigator` reads the saved run and produces findings. (Today: `ruptiq-analyze` extracts
+   signals from a saved experiment report; nothing interprets them yet.)
 
 ## WorkloadRunner: k6 adapter
 
@@ -568,12 +576,162 @@ samples, and the service's request counter rising in each, ending at the same nu
 
 One HTTP GET workload and one Prometheus endpoint per experiment. Sampling is periodic, so short
 events can fall between samples, and the scrapes themselves add a little load. Timestamps come from
-Ruptiq's machine. Values are stored as exposed: no rates, deltas, percentiles, or counter-reset
-detection yet. The report is held in memory until the end and written to one file; there is no run
+Ruptiq's machine. Values are stored as exposed; rates, differences, percentile estimates, and
+counter-reset detection are left to signal extraction, which reads the saved report afterwards.
+The report is held in memory until the end and written to one file; there is no run
 history, and `ruptiq-compare` does not read experiment reports. The retention budget approximates
 memory use rather than capping it, and once it is reached nothing more is sampled, even if later
 snapshots would be smaller; no attempt is made to keep, for example, the scrape after the workload
 by dropping an earlier one.
+
+## Signal extraction: analysing a saved experiment
+
+Package `internal/analysis` and the `ruptiq-analyze` command read one saved experiment report
+and calculate performance signals from its telemetry samples. This is the first step of
+evidence analysis, kept separate from the future `Investigator`: it turns raw, cumulative
+measurements into numbers with stated uncertainty and exact references to their source, and
+draws no conclusions. It works offline on the file only and imports neither the checkout demo nor
+any target: the metric family names and the method, route, and status label keys are
+configuration (`analysis.Config`), with defaults for the Inventory Service. It depends on
+`internal/experiment` (the report model), `internal/telemetry` (the snapshot model), and
+`internal/workload` (client metrics and URL redaction).
+
+### Reading a saved report
+
+`DecodeExperiment` first reads only `schema_version`, so a newer report is reported as
+unsupported rather than as having unknown fields. It then decodes strictly (unknown fields and
+trailing data are errors) into `experiment.Report`, and separately checks that every required
+field is present and not `null`, which the typed decode cannot tell from a zero value. Finally it
+checks the report's meaning and collects every problem (at most 10 quoted):
+
+- status is `passed`, `failed`, or `incomplete`; `error`, `cancelled`, and `timed_out` are
+  refused (`ErrNotAnalyzable`), because their workload did not complete;
+- the status agrees with the workload verdict and the telemetry completeness, and the
+  completeness agrees with the samples, errors, and not-retained records (recalculated);
+- counts agree (`attempts = succeeded + failed`, `succeeded = samples + not_retained`,
+  `failed = errors`), and the sequence numbers are exactly 1 to `attempts`, each once, in order
+  within each list, in time order, with the baseline first and the final scrape last;
+- every timestamp lies within the experiment, each `offset_seconds` agrees with its timestamp to
+  within 5 ms (which also catches a wall-clock change during the experiment), and sample
+  timestamps strictly increase;
+- families are unique per sample with known types; each series has the one value field its type
+  needs and unique labels; counters are finite and non-negative; histogram bounds strictly
+  increase, counts never decrease or exceed the count, and the `+Inf` bucket equals the count;
+- the client metrics are finite and non-negative, with failed requests at most the total.
+
+Anything else is rejected rather than repaired (`ErrInvalidReport`). Errors name fields and
+positions but never quote the report's URLs.
+
+### Windows
+
+The analysis works on windows: each pair of consecutive retained samples. A window's length is
+the difference between the two samples' `scraped_at` timestamps, not the configured interval.
+Scrape attempts between the two samples (failed, or not retained) are listed in the window as
+missed scrapes; the window is then longer, its rates are averages over the whole span, and a
+`scrape_gap` warning is raised. With fewer than two samples there are no windows.
+
+For each window and each series of the two configured families, the series is looked up by its
+full label set in both samples:
+
+- present in both, not decreased: its increase (later minus earlier) is used;
+- present only in the later sample (`series_appeared`): its earlier value is unknown, and it is
+  **not** treated as zero;
+- present only in the earlier sample (`series_disappeared`);
+- decreased (`counter_reset`, or `histogram_reset` for a count or bucket): the target probably
+  restarted.
+
+In the last three cases the route's signal for that window is unavailable, with the reason;
+nothing is partly counted. A family missing from a sample, or of the wrong type, makes that signal
+unavailable in the windows that need the sample. Series are grouped into routes by the method and
+route labels (either can be disabled), so a route's signal combines its statuses.
+
+### Signals
+
+- **Requests**: the sum of the route's counter increases, `per_second` = that / window length,
+  and a breakdown by status label value.
+- **5xx share**: increases of series whose status is 500-599, over the route's total. 4xx are
+  counted separately as client errors. The share is unavailable when there were no requests, no
+  status label is configured, or any series has a missing or non-numeric status.
+- **Interval histogram**: for each series, later cumulative buckets minus earlier ones, after
+  checking that the bounds are identical and no bucket or count decreased; the result must still
+  be cumulative and not exceed the count's increase. The route's series are added together, which
+  needs identical bounds.
+- **Mean latency**: the increase of the histogram sum divided by the increase of its count; exact
+  apart from rounding. Unavailable with no requests or a non-finite or negative sum increase.
+- **p95**: estimated from the interval histogram like PromQL's `histogram_quantile`: find the
+  first bucket whose cumulative count reaches rank 0.95 × total, and interpolate linearly between
+  its lower bound (the previous bucket's bound, or 0) and its upper bound. It is marked
+  `estimate: true` and comes with the bucket's bounds. It is unavailable with fewer than
+  `MinObservations` (default 20) requests, in the `+Inf` bucket, or above the largest bound of a
+  histogram without `+Inf`.
+- **Totals** add, per route, the windows in which the signal was available: request increases
+  over the summed length of those windows, and interval histograms (if every window has the same
+  bounds) for a whole-run p95 estimate. They list the windows used and excluded.
+
+Counter values are float64. Above 2^53 whole numbers are no longer exact, so a `precision`
+warning is raised; a sum or rate that is not finite makes the signal unavailable with an
+`overflow` warning, so the JSON never contains NaN or infinities. Histogram counts are unsigned
+integers and are compared before subtracting.
+
+k6's client-side results are copied unchanged into `client`. They are measured elsewhere (on the
+client, including network time) over a different time span, so they are not combined with or
+checked against the server-side signals.
+
+### Report model
+
+`analysis.Report` (schema version 1) has the input path and either `analysis` or `error`, so a
+failed analysis replaces an older file. `Analysis` has the experiment's identity (status,
+timestamps, redacted URLs, telemetry counts), the config used, `client`, `totals`, `windows`,
+`warnings`, and `limitations`. Every unavailable value is replaced by a reason string instead of
+a zero or null number. Evidence references name the metric and the exact label sets used; with the
+window's `from` and `to` (sequence, phase, timestamp, offset), each number can be traced back to
+two samples of the experiment report. Lists are always arrays, never `null`, and output is
+deterministic (routes, series, and statuses are sorted).
+
+### Redaction
+
+URLs from the report are redacted again with `workload.RedactURL`, and label values, reasons, and
+scrape errors with `workload.RedactText`, so a credential in a hand-edited report (or a URL in a
+label value) never reaches the summary or the file. A report written by `ruptiq-experiment` is
+already redacted. Decode errors that would quote a rejected value (a malformed timestamp or
+number) are replaced by a generic message, and unknown enumeration values are redacted with
+`workload.RedactText` before being shortened and quoted.
+
+### Testing
+
+Tests build experiment reports from a compact fixture builder (samples, failed scrapes, and
+unretained scrapes at given offsets, with counter and histogram series) and always round-trip them
+through `DecodeExperiment`, so the validation is exercised everywhere. They cover counter
+increases and rates over unequal intervals, multiple routes and statuses (4xx not counted as
+server errors), zero traffic, series appearing and disappearing, counter resets, failed and
+unretained scrapes, interval histograms combined across statuses with a hand-calculated p95,
+quantile edge cases (first bucket, rank on a bound, `+Inf` bucket, too few observations, no
+buckets), changed bucket bounds, histogram resets, non-cumulative increases, wrong family types,
+missing families, empty and single-sample telemetry, numeric edge cases (above 2^53, an
+overflowing rate, fractional counters, negative or NaN sums), configurable names for a different
+service, redaction, determinism, and bounded console output. Decode tests cover every accepted
+status, unsupported and malformed schemas, missing fields, and 38 kinds of inconsistent report.
+A golden analysis and summary of a synthetic Inventory Service experiment
+(`testdata/inventory_experiment.json`) record the full output, and the experiment package's own
+saved report (written by the real coordinator) is analysed with a generic metric name. Mutating
+the code to divide by a fixed one second, to count an appearing series from zero, or to accept a
+decreasing counter makes tests fail.
+
+Command tests cover the summary and JSON file, custom metric names, every bad-report class (each
+writes an error report), a missing input, usage errors, an unwritable output, and redaction in
+stdout, stderr, and the file. No test needs k6, Docker, or a running service.
+
+### Limitations
+
+Signals are averages over windows of about one sampling interval, so short events are invisible,
+and a run with a few windows says little about variability; no significance is tested. p95 is
+only as precise as the bucket bounds. Server-side counters include all clients' traffic and are
+not reconciled with k6's counts. Latency combines a route's statuses. Windows at the start and
+end of the run include time without full load, and on a freshly started service the first window
+is usually unavailable because series appear at their first request. Only one request counter
+and one duration histogram are interpreted. The whole report is held in memory (bounded by
+`-max-input-bytes`, default 128 MiB). Signal extraction is not diagnosis: it does not rank
+causes, explain changes, or compare experiments.
 
 ## Checkout demo: Order Service
 
@@ -1181,6 +1339,9 @@ checkout works across the three containers.
   from a Prometheus text-format endpoint, with a console summary and JSON output.
 - `cmd/ruptiq-experiment`, `internal/experiment`: one k6 workload with periodic Prometheus
   sampling before, during, and after it, combined in one versioned JSON report.
+- `cmd/ruptiq-analyze`, `internal/analysis`: offline signal extraction from a saved experiment
+  report: per-window request rates, 5xx shares, and histogram p95 estimates, with evidence
+  references, warnings for missing or reset series, and a versioned JSON report.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -1194,8 +1355,7 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-Rates, differences, and percentiles computed from telemetry samples, `Investigator`,
-`RunStore` (run history), load ramps, cancellation and compensation across services, persistence,
+`Investigator` (diagnosis), `RunStore` (run history), comparison of experiments, load ramps, cancellation and compensation across services, persistence,
 target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
 tracing are not implemented.
 
