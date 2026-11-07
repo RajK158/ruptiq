@@ -28,7 +28,8 @@ Service exposes Prometheus metrics, and Ruptiq Core can read one snapshot of any
 endpoint or sample one periodically while a k6 load test runs, saving both in one experiment
 report, and turn the samples into rates, 5xx shares, and estimated percentiles. Item 3 has started:
 `ruptiq-investigate` ranks evidence-backed observations of degradation within one experiment and
-abstains when the evidence is inadequate, but it does not identify causes. Item 4 is in progress
+abstains when the evidence is inadequate, but it does not identify causes. It has been run on a
+controlled live change in `demo/regression-lab/` as well as on synthetic data. Item 4 is in progress
 (see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
@@ -68,7 +69,8 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Prometheus telemetry reader (`ruptiq-telemetry`, one snapshot) | Done; unit tested against local test servers, and run against the real Inventory Service (see below) |
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
-| Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, and run offline on the synthetic experiment through `ruptiq-analyze`. Not yet run on a real experiment |
+| Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, run offline on the synthetic experiment, and run on a live controlled change from `demo/regression-lab/` (see below) |
+| Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
 | Root-cause diagnosis, comparison of experiments, run storage, load ramps | Not started |
@@ -1207,7 +1209,129 @@ routes, and evidence for the wrong metric. Up to 10 problems are listed.
 - Thresholds are fixed rules of thumb, not calibrated to any service. A gradual change that never
   separates the two halves cleanly is reported as inconclusive.
 - Latency combines all statuses of a route, as in the analysis.
-- It has been run only on synthetic data so far, not on an experiment against a real service.
+- Until the regression lab (below), it had been run only on synthetic data. One live run against
+  that lab is recorded there; it is still not a comparison between versions or a root-cause
+  diagnosis.
+
+## Validate the pipeline with a controlled change (`demo/regression-lab`)
+
+`demo/regression-lab/` is a small HTTP target used only to check that the existing pipeline
+(k6 → Prometheus samples → `ruptiq-analyze` → `ruptiq-investigate`) reports a change that really
+happened. It is **not** a checkout service, not production software, and not a claim that Ruptiq
+can name CPU, database, or network bottlenecks. It executes extra integer arithmetic on
+`GET /work` after a timer; Prometheus records the real handling time of that work.
+
+It listens on loopback only (`127.0.0.1:8090` by default). There is no HTTP switch for the mode:
+the first `GET /work` starts a timer (`-degrade-after`, default 10s), then the handler uses a
+heavier CPU loop. `GET /metrics` exposes `regression_lab_degraded` (0 or 1) so the transition can
+be checked independently of Ruptiq. `GET /healthz` does not start the timer. The `GET /work` 200
+counter and histogram series are created at process start, so the first snapshot is not missing
+them.
+
+### Start the lab
+
+From the repository root, in its own terminal:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 10s
+```
+
+The process logs the iteration counts it calibrated on this machine (or the counts you passed
+with `-baseline-iters` and `-degraded-iters`). There is no admin port. Stop it with Ctrl+C.
+
+### Run the experiment, analysis, and investigation
+
+Use a portable k6 if `k6` is not on `PATH` (`-k6` or `RUPTIQ_K6_PATH`). Write reports to a local
+directory that is not committed (`tmp/` is gitignored):
+
+```sh
+mkdir tmp
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -out tmp/experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/experiment.json -out tmp/analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+go run ./cmd/ruptiq-investigate -in tmp/analysis.json -out tmp/investigation.json
+```
+
+Leave the investigator's default thresholds unchanged. About 20 seconds at 1s sampling is enough
+for several baseline windows and several degraded windows with the default 10s switch.
+
+### Review the evidence
+
+In `tmp/investigation.json`, each finding lists `evidence` JSON pointers into `tmp/analysis.json`
+(array indexes count from 0; window numbers from 1). Resolve a pointer such as
+`/analysis/windows/1/routes/1/latency/p95` to the p95 object of analysis window 2. Confirm that
+`regression_lab_degraded` in `tmp/experiment.json` flips from 0 to 1 near `-degrade-after`, and
+that later analysis windows are the slow ones.
+
+### Expected behaviour
+
+After the first `GET /work`, the lab stays in baseline mode until `-degrade-after`. Then
+`regression_lab_degraded` becomes 1 and each `/work` does more CPU loop iterations. Server-side
+request rates should fall and histogram p95 should move into a later bucket. Windows that touch
+the workload's start or end are excluded by the investigator; a window that straddles the switch
+may be left out as the middle window of an odd count. `GET /healthz` has almost no traffic during
+the load, so that route should abstain.
+
+k6's **whole-run** p95 can stay close to the fast baseline: most of the requests happen in the
+first half, so they dominate a single percentile over 20s. The investigator compares earlier
+windows with later windows, which is the point of this fixture.
+
+### Observed behaviour (one run)
+
+One run on the development machine (Windows, portable k6 v2.3.0, 2 VUs, 20s, 1s interval, lab
+on `127.0.0.1:18090`, `-degrade-after 10s`, calibrated `baseline_iters=157135` and
+`degraded_iters=11233031`). Reports were written under the machine's temp directory, not Git.
+
+| Signal | Observed |
+| --- | --- |
+| k6 | 39379 requests, 1968.0 req/s, 0% failed, avg 0.942 ms, p95 1.461 ms, max 89.335 ms, 20.01s |
+| Prometheus snapshots | 22 of 22 scrapes succeeded (1 before, 20 during, 1 after) |
+| `regression_lab_degraded` | 0 through sample #11 (+10.0s), 1 from sample #12 (+11.0s) through #22 |
+| GET `/work` baseline (windows 2–10) | median 4577.2 req/s, p95 estimate ~0.933 ms (0.500–1.000 ms bucket) |
+| GET `/work` degraded (windows 12–20) | median 153.0 req/s, p95 estimate ~24.163 ms (10–25 ms bucket) |
+| Transition | window 11 (samples #11–#12): 2026.9 req/s, p95 still ~0.996 ms; left out as the middle window |
+
+`ruptiq-investigate` outcome: `changes_observed`. Ranked findings (default thresholds, none
+weakened):
+
+1. `combined_degradation` (major, **hypothesis**) for GET `/work`: p95 +2489.7% and throughput
+   −96.7% over the same windows 2–10 vs 12–20. Not a proven cause.
+2. `latency_degradation` (major, observation): ~0.933 ms → ~24.163 ms. Evidence starts at
+   `/analysis/windows/1/routes/1/latency/p95` (window 2 p95 = 0.000943 s, matching the analysis).
+3. `throughput_degradation` (major, observation): 4577.2 → 153.0 req/s. Evidence starts at
+   `/analysis/windows/1/routes/1/requests` (window 2 = 1702.5 req/s, 1649 requests).
+4. `insufficient_evidence` for GET `/healthz`: no load on that route.
+
+Every evidence pointer in that investigation resolved to an object in the saved analysis. The
+output matched the controlled switch: later windows were the slow, low-rate ones, and the
+independent `regression_lab_degraded` gauge flipped at 10s. This does **not** show a CPU, database,
+or network bottleneck in a real application; the lab added CPU work on purpose.
+
+### Options
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-addr` | `127.0.0.1:8090` | Listen address. Must be loopback (`127.0.0.1`, `::1`, or `localhost`). |
+| `-degrade-after` | `10s` | Delay after the first `GET /work` before heavier CPU work. `0` degrades immediately. |
+| `-baseline-iters` | `0` (calibrate to ~250µs) | CPU-loop iterations per `/work` in baseline mode. Must be between 0 and 50,000,000. |
+| `-degraded-iters` | `0` (calibrate to ~12ms) | CPU-loop iterations per `/work` in degraded mode. Must be greater than baseline and at most 50,000,000. |
+
+### Tests
+
+`go test ./demo/regression-lab` covers `/work` and `/healthz`, real counters and histograms, the
+mode switch, concurrent requests during the switch, bounded metric labels and iteration flags,
+loopback binding, and process startup/shutdown. Health and metrics scrapes do not start the
+timer. It does not start k6. Set `RUPTIQ_LIVE_K6=1` only to confirm a k6 binary is visible; the
+20s pipeline above is the live check.
+
+### Limitations
+
+- Calibration of iteration counts varies by CPU and load; read them from the listening log if you
+  need to repeat a run. Other machines will not match the table above.
+- Environmental noise (other processes, turbo boost, two VUs sharing cores) moves the exact rates.
+  The buckets in this run were far apart; a quieter or busier machine might land differently.
+- k6's whole-run percentile is the wrong tool for a mid-run change; use the windowed analysis.
+- The lab has no authentication, no persistence, and no checkout behaviour. Do not expose it off
+  loopback.
 
 ## Checkout demo with Docker Compose
 
@@ -2138,7 +2262,8 @@ program (the test binary itself) and saved k6 summaries, the experiment coordina
 fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker, the
 analyzer against synthetic experiment reports and the experiment package's saved report, and the
 investigator against fake analyses, the saved analysis of the synthetic experiment, and an offline
-experiment-to-analysis-to-investigation chain.
+experiment-to-analysis-to-investigation chain. The regression lab's tests hit its own handler only;
+they do not run k6.
 
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
@@ -2176,6 +2301,8 @@ internal/analysis/                       Ruptiq Core: reads and validates saved 
 internal/investigation/                  Ruptiq Core: reads and validates saved analyses, compares
                                          earlier and later windows, ranked findings with evidence
                                          references, console summary
+demo/regression-lab/                     Validation fixture (NOT Ruptiq Core, not checkout): loopback
+                                         HTTP target with real CPU work and Prometheus metrics
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
