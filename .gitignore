@@ -11,6 +11,9 @@
 /build/
 /ruptiq-api
 
+# Local experiment outputs (never commit generated reports)
+/tmp/
+
 # Go coverage and profiling output
 *.coverprofile
 coverage.txt

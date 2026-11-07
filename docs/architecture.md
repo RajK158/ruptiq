@@ -11,8 +11,10 @@
 > experiment report (see "Signal extraction: analysing a saved experiment"), and a first,
 > deterministic `Investigator` that ranks evidence-backed findings from a saved analysis (see
 > "Investigator: evidence-driven findings"). It reports observations and hypotheses, not root
-> causes. `RunStore` does not exist in code yet. This document records the intended
-> direction so early code does not paint us into a corner.
+> causes. A loopback-only regression lab (`demo/regression-lab/`) is a validation fixture that
+> changes CPU work mid-run so the existing pipeline can be checked against a known switch; it is
+> not a checkout service and not a root-cause engine. `RunStore` does not exist in code yet. This
+> document records the intended direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
 
@@ -907,7 +909,24 @@ regression between versions cannot be shown. Only degradation is looked for. The
 conservative rules of thumb, not calibrated to any service, and a gradual change that never
 separates the halves is reported as inconclusive. There are no resource, dependency, or network
 measurements, so causes are never identified, and client-side measurements are not used. The
-engine has only been run on synthetic data.
+engine has only been run on synthetic data in unit tests. One live run against
+`demo/regression-lab/` (see below) used the same commands and default thresholds.
+
+## Regression lab: a known mid-run change
+
+`demo/regression-lab/` is a validation fixture, not Ruptiq Core and not the checkout demo. It
+serves `GET /work`, `GET /healthz`, and `GET /metrics` on loopback. `GET /work` runs a tight
+integer loop (FNV-1a mixing); the iteration count is the baseline until `-degrade-after` after
+the first `/work`, then a larger count. Iteration flags and calibration are capped at 50 million
+loops per request. Prometheus histograms observe the real handler duration.
+The `GET /work` 200 series is registered at start. `regression_lab_degraded` is 0 then 1, so the
+switch can be checked without trusting Ruptiq.
+
+There is no HTTP control plane. Non-loopback listen addresses are rejected. Core packages do not
+import it; it does not import Core. Commands to run `ruptiq-experiment`, `ruptiq-analyze` (with
+this lab's metric names), and `ruptiq-investigate` (default thresholds) are in README.md, with
+one recorded live run. Generated reports stay out of Git. The lab does not prove a CPU bottleneck
+in any real application: the extra work is the fixture.
 
 ## Checkout demo: Order Service
 
@@ -1522,7 +1541,10 @@ checkout works across the three containers.
 - `cmd/ruptiq-investigate`, `internal/investigation`: the first `Investigator`, offline and
   deterministic: ranked observations of 5xx increases and latency and throughput degradation
   between earlier and later windows of one experiment, with evidence references, contradictions,
-  limitations, and validation experiments, or an explicit abstention.
+  limitations, and validation experiments, or an explicit abstention. Run on synthetic analyses
+  and on one live controlled change from the regression lab.
+- `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
+  timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by
@@ -1545,7 +1567,7 @@ tracing are not implemented.
 - Where each further checkout demo service lives (under `demo/checkout/`, separate from Core).
 - Whether the demo eventually gets its own Go module (it shares Core's module for now). Core
   imports only the Prometheus text parser and data model (`common/expfmt`, `client_model`); the
-  client library (`client_golang`) is in `go.mod` for the Inventory Service alone.
+  client library (`client_golang`) is in `go.mod` for the Inventory Service and the regression lab.
 - Storage technology for `RunStore`.
 - Whether load generation stays with k6 for ramps, other request types, and distributed load.
 - The adapter mechanism for external targets.
