@@ -26,8 +26,10 @@ Item 1 has started: Ruptiq can run a short HTTP GET load test with k6, save its 
 file, and compare two saved results, but has no run history yet. Item 2 has started: the Inventory
 Service exposes Prometheus metrics, and Ruptiq Core can read one snapshot of any Prometheus
 endpoint or sample one periodically while a k6 load test runs, saving both in one experiment
-report. It does not yet turn the samples into rates or percentiles. Item 3 does not exist yet; item
-4 is in progress (see below). See
+report, and turn the samples into rates, 5xx shares, and estimated percentiles. Item 3 has started:
+`ruptiq-investigate` ranks evidence-backed observations of degradation within one experiment and
+abstains when the evidence is inadequate, but it does not identify causes. Item 4 is in progress
+(see below). See
 [docs/architecture.md](docs/architecture.md) for how these pieces are planned to fit together.
 
 ## Current implementation status
@@ -36,9 +38,11 @@ Ruptiq Core has a health-check server; `ruptiq-run`, a command that runs one HTT
 with [k6](https://k6.io) against any URL and reports what k6 measured; `ruptiq-compare`, which
 compares two saved `ruptiq-run` results offline; `ruptiq-telemetry`, which reads one snapshot
 of a target's Prometheus metrics; `ruptiq-experiment`, which runs a k6 load test while
-sampling a Prometheus endpoint and saves both in one report; and `ruptiq-analyze`, which
+sampling a Prometheus endpoint and saves both in one report; `ruptiq-analyze`, which
 calculates server-side throughput, 5xx rates, and estimated latency percentiles from a saved
-experiment report, offline. The checkout demo has three
+experiment report, offline; and `ruptiq-investigate`, which ranks evidence-backed findings
+(observations and hypotheses to test, not root causes) from a saved analysis, offline. The
+checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
@@ -64,9 +68,10 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Prometheus telemetry reader (`ruptiq-telemetry`, one snapshot) | Done; unit tested against local test servers, and run against the real Inventory Service (see below) |
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
+| Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, and run offline on the synthetic experiment through `ruptiq-analyze`. Not yet run on a real experiment |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
-| Diagnosis (investigation of causes), run storage, load ramps | Not started |
+| Root-cause diagnosis, comparison of experiments, run storage, load ramps | Not started |
 
 ## Requirements
 
@@ -956,7 +961,253 @@ experiments are refused, because their workload did not complete.
 - Only one request counter and one duration histogram are analysed; other metrics (such as the
   in-flight gauge or stock levels) are kept in the experiment report but not interpreted.
 - These are **signals, not a diagnosis**. A higher p95 or 5xx share in one window says what was
-  measured, not why. Ruptiq does not yet rank causes, explain changes, or compare experiments.
+  measured, not why. `ruptiq-investigate` (below) compares the windows and ranks the changes it
+  finds, but it does not identify causes or compare experiments either.
+
+## Investigate a saved analysis (`ruptiq-investigate`)
+
+`ruptiq-investigate` reads one analysis saved with `ruptiq-analyze -out` and reports ranked,
+evidence-backed findings: for each route, whether the 5xx ratio, the estimated p95, or the request
+rate changed materially between the earlier and the later windows of the experiment. It is
+deterministic and works offline on the saved file only: no load test, no network, no language
+model. **A finding is an observation or a hypothesis to test, never a proven root cause.**
+
+```sh
+go run ./cmd/ruptiq-analyze -in experiment.json -out analysis.json
+go run ./cmd/ruptiq-investigate -in analysis.json -out investigation.json
+```
+
+The output below is from the synthetic test fixture (see
+[Analyze a saved experiment](#analyze-a-saved-experiment-ruptiq-analyze)), not a real experiment.
+Only windows 2 and 3 of its four were taken entirely during the load, fewer than the four the
+default thresholds need, so the investigator abstains:
+
+```text
+Source:       passed experiment, telemetry complete, 4 windows (2 comparable: 2-3)
+Thresholds:   2+ windows and 100+ requests per side; 5xx ratio +1.00 points and 2x (5+ errors); p95 +50.0%; throughput -30.0%
+Outcome:      insufficient_evidence
+              No signal of any route could be compared (2 of 4 windows are comparable); the investigation abstains.
+
+Findings (ranked; observations and hypotheses to test, not proven root causes):
+  1. insufficient_evidence [abstention] insufficient_evidence-a76631a81bc2
+     GET /inventory/{sku}: 3 of 3 signals could not be compared
+     throughput: 2 usable window(s) of 2 comparable; at least 4 (2 per side) are needed
+     server_error_ratio: 2 usable window(s) of 2 comparable; at least 4 (2 per side) are needed
+     p95_latency: 2 usable window(s) of 2 comparable; at least 4 (2 per side) are needed
+     Next: Repeat the experiment at least 3 times with the same target and 2 VUs for at least 10s (...)
+  2. insufficient_evidence [abstention] insufficient_evidence-1ea60157359d
+     POST /reservations: 3 of 3 signals could not be compared
+     ...
+
+Excluded windows:
+  window 1: spans the workload's start or end (samples #1 before_workload to #2 during_workload), so its load is not steady
+  window 4: spans the workload's start or end (samples #4 during_workload to #5 after_workload), so its load is not steady
+
+Not a diagnosis: no finding is a proven root cause, and no statistical significance test is made. See the limitations in the JSON report.
+```
+
+With `-min-windows 1` (one window per side, which the report warns is noisy) the same fixture gives
+one observation. GET served 3000 requests in window 2's 1.008 s (2976.2/s) and 3020 in window 3's
+1.490 s (2026.8/s), a fall of 31.9%, just past the 30% threshold:
+
+```text
+  1. throughput_degradation [moderate, observation] throughput_degradation-a76631a81bc2
+     GET /inventory/{sku}: completed requests fell from 2976.2 requests/s to 2026.8 requests/s (-31.9%)
+     Windows: baseline 2, comparison 3; 2 evidence references (first: /analysis/windows/1/routes/0/requests)
+     Contradicting: p95 latency did not rise materially (the p95 estimate changed by -0.0%, short of the +50.0% threshold): a slower service would usually raise latency, so the load generator may simply have sent fewer requests
+```
+
+The summary is capped at 10 findings, 10 inconclusive signals, and 10 excluded windows; the JSON
+file has everything.
+
+### What it can conclude
+
+| Finding | Designation | Reported when |
+| --- | --- | --- |
+| `server_error_increase` | observation | The route's pooled 5xx ratio rose by at least 1 percentage point, to at least twice a non-zero baseline, with at least 5 5xx responses in the comparison and 100 requests on each side. |
+| `latency_degradation` | observation | The median of the windows' p95 estimates rose by at least 50%, **and** every comparison window's p95 bucket lies above every baseline window's bucket, with at least 100 observations on each side. |
+| `throughput_degradation` | observation | The median of the windows' request rates fell by at least 30%, **and** every comparison window's rate is below every baseline window's, with at least 100 requests in the baseline. |
+| `combined_degradation` | hypothesis | Both latency and throughput degradation hold for one route over exactly the same windows. That they share a cause is the hypothesis. |
+| `insufficient_evidence` | abstention | A route's signal could not be compared: too few usable windows, too little traffic, a zero baseline, or windows in which the signal was unavailable (a counter reset, a series that appeared or disappeared, changed histogram buckets, a missing metric, or a p95 that could not be estimated). |
+
+A change that reaches its threshold but fails a robustness check (p95 estimates in overlapping
+buckets, rates whose windows overlap, too few 5xx responses, or a ratio that did not double) is
+listed as `inconclusive` in `assessments`, not as a finding. Every compared signal, including those
+with no material change, is in `assessments`, so a missing finding can be told from a missing
+measurement. All thresholds are flags (see Options).
+
+### What it cannot conclude
+
+- **Causes.** The analysis holds request counts, status codes, and latency histograms only. There
+  are no CPU, memory, database, or network measurements, so none of these is ever named as a cause.
+  They appear only as untested hypotheses ("Hypothesis (untested): ...") with what would be needed
+  to test them. Every finding has `"proven_root_cause": false`.
+- **Regressions.** A finding compares earlier and later windows of one run. One run cannot show
+  that a version is slower than another; repeat the experiment (see below).
+- **Significance.** No statistical significance test is made. "Material" means a change exceeded
+  a fixed, configurable threshold, nothing more. There are no confidence percentages.
+- **Capacity from errors.** A higher 5xx ratio does not by itself mean lower capacity: errors can
+  come from bad input, a failing dependency, or deliberate load shedding. Each finding says so.
+- **Client-side numbers.** k6 measures the whole run on the client, including network time; the
+  server's signals cover windows between scrapes. They are not compared.
+- **Stability from abstention.** An `insufficient_evidence` finding means nothing was concluded,
+  not that performance was stable.
+
+### How windows are compared
+
+1. Only windows whose two samples were both taken during the workload, with no missed scrapes
+   between them, are comparable. Windows touching the before or after sample include the load
+   generator starting or stopping; a window spanning missed scrapes covers a longer, different
+   span. Excluded windows are listed with the reason.
+2. For each route and signal, the windows in which the signal is available are split in two: the
+   earlier half is the baseline and the later half the comparison. With an odd number, the middle
+   window is in neither side. Each side needs `-min-windows` windows (default 2).
+3. Rates and p95 use the median of the side's windows, so one unusual window cannot decide the
+   result; the 5xx ratio pools the side's 5xx responses and requests. Rates come from
+   `ruptiq-analyze`, which divides counter increases by each window's measured length.
+4. Zero baselines are never divided by: a zero baseline rate or p95 is insufficient evidence, and
+   a 5xx increase from 0% has no relative change (`relative_unavailable`).
+
+### How findings are ranked
+
+Findings are sorted by these rules, in order, and numbered from 1. The rule is written into every
+finding (`ranking.rule`) with the values used.
+
+1. Observations and hypotheses before abstentions.
+2. Severity: `major` (the change is at least twice its threshold) before `moderate`.
+3. Type: combined, then server errors, then latency, then throughput.
+4. The larger `threshold_multiple` (the change divided by its threshold; for a combined finding,
+   the smaller of its two).
+5. More windows compared, then more requests or observations.
+6. Method, route, and finding ID, so the order is always the same.
+
+Finding IDs are stable: the type and a hash of the method and route, such as
+`latency_degradation-a76631a81bc2` for GET `/inventory/{sku}`.
+
+### Evidence references
+
+Each finding lists the analysis measurements it was calculated from, as
+[JSON pointers](https://www.rfc-editor.org/rfc/rfc6901) into the analysis file, with the window,
+the role (`baseline`, `comparison`, `warning`, or `excluded`), the metric, and the series labels:
+
+```json
+{ "pointer": "/analysis/windows/1/routes/0/requests", "window": 2, "role": "baseline",
+  "metric": "inventory_http_requests_total", "series": [ { "method": "GET", ... } ] }
+```
+
+Array positions in pointers count from 0, window indexes from 1, so window 2 is
+`/analysis/windows/1`. An abstention points at the analysis warnings about its route and at the
+route in the excluded windows. Through the analysis' own evidence and sample references, every
+number can be traced back to the experiment report.
+
+### Running a validation experiment
+
+Every finding has a `next_experiment`. It always starts with repeating the experiment, with the same
+target and VUs and long enough for twice the windows a comparison needs, at least 3 times:
+
+```sh
+go run ./cmd/ruptiq-experiment -url http://localhost:8082/inventory/LAPTOP-001 -metrics-url http://localhost:8082/metrics -vus 2 -duration 10s -interval 1s -out run1.json
+go run ./cmd/ruptiq-analyze -in run1.json -out run1-analysis.json
+go run ./cmd/ruptiq-investigate -in run1-analysis.json -out run1-investigation.json
+```
+
+A finding that does not recur in most runs was probably noise. One that does recur is still an
+observation; the next step depends on its type, for example running at half and twice the VUs to
+see whether p95 follows the load, or collecting the service's logs for the comparison windows to see
+which 5xx errors were returned. Ruptiq does not run these experiments itself.
+
+### Options
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-in` | (required) | Saved `ruptiq-analyze` report. |
+| `-out` | (none) | Also write the investigation as JSON to this file. Must not be the input. |
+| `-max-input-bytes` | `134217728` (128 MiB) | Largest analysis accepted, 1 KiB to 1 GiB. |
+| `-min-windows` | `2` | Fewest usable windows in each of the baseline and the comparison, 1 to 1000. |
+| `-min-requests` | `100` | Fewest requests (latency: observations) per side; for throughput, in the baseline only. |
+| `-min-server-errors` | `5` | Fewest 5xx responses in the comparison for a server error increase. |
+| `-error-ratio-increase` | `0.01` | Smallest rise of the 5xx ratio, as a fraction (0.01 is 1 percentage point). |
+| `-error-ratio-factor` | `2` | How many times a non-zero baseline 5xx ratio the comparison's must be. |
+| `-latency-increase` | `0.5` | Smallest relative rise of the p95 estimate (+50%). |
+| `-throughput-decrease` | `0.3` | Smallest relative fall of the request rate (-30%). |
+
+### The JSON file
+
+```json
+{
+  "schema_version": 1,
+  "input": "analysis.json",
+  "investigation": {
+    "source": { "experiment_status": "passed", "telemetry_completeness": "complete", "windows": 4, ... },
+    "config": { "min_windows_per_side": 2, "min_requests_per_side": 100, ... },
+    "outcome": "changes_observed",
+    "summary": "...",
+    "windows": { "comparable": [2, 3], "excluded": [ { "window": 1, "reason": "...", "pointer": "/analysis/windows/0" } ] },
+    "findings": [
+      {
+        "rank": 1, "id": "throughput_degradation-a76631a81bc2", "type": "throughput_degradation",
+        "designation": "observation", "proven_root_cause": false,
+        "method": "GET", "route": "/inventory/{sku}", "severity": "moderate", "symptom": "...",
+        "changes": [ { "signal": "throughput",
+                       "baseline":   { "value": 2976.19, "unit": "requests/s", "statistic": "median of the windows' request rates", ... },
+                       "comparison": { "value": 2026.85, "unit": "requests/s", ... },
+                       "change": { "absolute": -949.34, "unit": "requests/s", "relative": -0.319, "threshold_multiple": 1.063 } } ],
+        "baseline_windows": [2], "comparison_windows": [3],
+        "evidence": [ ... ], "explanation": "...", "ranking": { ... },
+        "contradictions": [ ... ], "limitations": [ ... ], "possible_explanations": [ ... ],
+        "next_experiment": "..."
+      }
+    ],
+    "assessments": [ { "method": "GET", "route": "/inventory/{sku}", "signal": "p95_latency", "status": "no_material_change", ... } ],
+    "limitations": [ ... ]
+  }
+}
+```
+
+- `outcome` is `changes_observed` (at least one observation), `no_material_change` (signals were
+  compared and none changed materially), or `insufficient_evidence` (nothing could be compared).
+- p95 measures are marked `"estimate": true` and carry the lowest and highest bucket bounds of the
+  side's windows.
+- If the analysis cannot be investigated, the file has `error` instead of `investigation`, written
+  over any earlier file, so an older investigation cannot be mistaken for the latest one.
+
+### Validation and exit status
+
+The input must be a `ruptiq-analyze` file with `schema_version` 1 and an `analysis`. A file that
+records a failed analysis (`error`) is refused. Anything inconsistent is rejected, never repaired:
+unknown fields, window indexes or sample sequences out of order, window lengths that disagree with
+their timestamps, rates that are not requests divided by elapsed time, status counts that do not
+add up, 5xx ratios that disagree with their counts, p95 estimates outside their bucket or from
+fewer observations than the analysis' minimum, a signal both present and unavailable, repeated
+routes, and evidence for the wrong metric. Up to 10 problems are listed.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | The analysis was investigated, including when the outcome is `insufficient_evidence`. |
+| 2 | Invalid arguments or thresholds. |
+| 3 | The analysis could not be read, is too large, invalid, unsupported, or records a failed analysis; or the investigation could not be written. |
+
+### Safety
+
+- Read-only: only the input file is read. Nothing is sent anywhere, and nothing is changed in the
+  target.
+- URLs are redacted again (user information and query string replaced by `xxxxx`), and so are URLs
+  in route names, label values, and a recorded analysis error. Validation errors never quote a
+  malformed timestamp or number.
+- The input size is bounded (`-max-input-bytes`), copied text is shortened, and the output file is
+  replaced atomically (written to a temporary file, then renamed).
+
+### Limitations
+
+- The engine compares only earlier and later windows of one experiment, with the windows the
+  analysis provides. With the default thresholds a comparison needs at least 4 windows entirely
+  during the load (at a 1s interval, a load of about 5s or more), and more to be useful; shorter
+  runs abstain.
+- It looks for degradation only: an improvement is reported as no material change.
+- Thresholds are fixed rules of thumb, not calibrated to any service. A gradual change that never
+  separates the two halves cleanly is reported as inconclusive.
+- Latency combines all statuses of a route, as in the analysis.
+- It has been run only on synthetic data so far, not on an experiment against a real service.
 
 ## Checkout demo with Docker Compose
 
@@ -1666,14 +1917,14 @@ requests as 0 seconds; this was seen when running the service locally.
 **Reading it with Ruptiq Core:** `ruptiq-telemetry` reads one snapshot of these metrics (see
 [Read a telemetry snapshot](#read-a-telemetry-snapshot-ruptiq-telemetry)), and
 `ruptiq-experiment` samples them before, during, and after a k6 load test (see
-[Run an experiment](#run-an-experiment-ruptiq-experiment)). What Ruptiq Core still needs before it
-can investigate this telemetry automatically:
+[Run an experiment](#run-an-experiment-ruptiq-experiment)); `ruptiq-analyze` turns them into
+per-window rates and estimated percentiles, and `ruptiq-investigate` ranks the changes between
+windows. What Ruptiq Core still needs to investigate this telemetry fully:
 
-- Turning counters and histograms into per-run rates and percentiles (differences between scrapes,
-  handling counter resets when the service restarts). Histogram percentiles are estimates bounded
-  by the bucket edges.
 - Saving telemetry with each run (`RunStore`), so that comparisons can include it.
-- An `Investigator` that relates the client-side and server-side numbers.
+- A fuller `Investigator`: `ruptiq-investigate` compares windows within one experiment's server-side
+  signals, but does not relate them to the client-side numbers, compare experiments, or measure
+  resources such as CPU.
 - Metrics from the Order and Payment Services; today only the Inventory Service has them.
 
 ### Current limitations
@@ -1884,8 +2135,10 @@ formatted.
 
 None of the tests need k6, Docker, or network access: the k6 adapter is tested against a fake k6
 program (the test binary itself) and saved k6 summaries, the experiment coordinator against
-fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker, and
-the analyzer against synthetic experiment reports and the experiment package's saved report.
+fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker, the
+analyzer against synthetic experiment reports and the experiment package's saved report, and the
+investigator against fake analyses, the saved analysis of the synthetic experiment, and an offline
+experiment-to-analysis-to-investigation chain.
 
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
@@ -1907,6 +2160,7 @@ cmd/ruptiq-compare/                      Ruptiq Core: run comparison command (fl
 cmd/ruptiq-telemetry/                    Ruptiq Core: telemetry snapshot command (flags, JSON file)
 cmd/ruptiq-experiment/                   Ruptiq Core: experiment command (flags, exit codes, JSON file)
 cmd/ruptiq-analyze/                      Ruptiq Core: offline analysis command (flags, files, exit codes)
+cmd/ruptiq-investigate/                  Ruptiq Core: offline investigation command (flags, files, exit codes)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
@@ -1919,6 +2173,9 @@ internal/experiment/                     Ruptiq Core: experiment coordinator (wo
 internal/analysis/                       Ruptiq Core: reads and validates saved experiment reports,
                                          per-window rates, 5xx shares, histogram p95 estimates,
                                          console summary
+internal/investigation/                  Ruptiq Core: reads and validates saved analyses, compares
+                                         earlier and later windows, ranked findings with evidence
+                                         references, console summary
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors
