@@ -1,0 +1,34 @@
+Experiment:   passed, telemetry complete (5 samples, 0 scrape errors, 0 not retained)
+  Target:     http://127.0.0.1:8082/inventory/LAPTOP-001
+  Metrics:    http://127.0.0.1:8082/metrics
+Windows:      4, covering 3.750s (samples #1 to #5); 0 span missed scrapes
+Client:       k6 (client side): 9000 requests, 2999.6 req/s, 0.00% failed, p95 0.680 ms (measured by the load generator)
+
+Server signals over all usable windows (inventory_http_requests_total, inventory_http_request_duration_seconds):
+  GET /inventory/{sku}
+    Throughput: 8040 requests in 3.750s = 2144.0 req/s (windows 1-4)
+    5xx:        0 of 8040 (0.00%); 4xx client errors, not counted as server errors: 40
+    Latency:    p95 ~0.989 ms (estimate; within the 0.500 ms to 1.000 ms bucket), mean 0.399 ms, 8040 requests
+  POST /reservations
+    Throughput: 106 requests in 3.750s = 28.3 req/s (windows 1-4)
+    5xx:        6 of 106 (5.66%); 4xx client errors, not counted as server errors: 0
+    Latency:    p95 ~27.917 ms (estimate; within the 25.000 ms to 50.000 ms bucket), mean 5.094 ms, 106 requests
+
+Windows:
+    1  #1->#2    1.002s  GET /inventory/{sku}: 2016.0 req/s, 5xx 0.00%, p95 ~0.989 ms
+    1  #1->#2    1.002s  POST /reservations: 41.9 req/s, 5xx 4.76%, p95 ~4.987 ms
+    2  #2->#3    1.008s  GET /inventory/{sku}: 2976.2 req/s, 5xx 0.00%, p95 ~0.989 ms
+    2  #2->#3    1.008s  POST /reservations: 39.7 req/s, 5xx 0.00%, p95 ~4.750 ms
+    3  #3->#4    1.490s  GET /inventory/{sku}: 2026.8 req/s, 5xx 0.00%, p95 ~0.989 ms
+    3  #3->#4    1.490s  POST /reservations: 16.1 req/s, 5xx 16.67%, p95 ~42.500 ms
+    4  #4->#5    0.250s  GET /inventory/{sku}: 0.0 req/s, 5xx n/a, p95 n/a
+    4  #4->#5    0.250s  POST /reservations: 0.0 req/s, 5xx n/a, p95 n/a
+
+Limitations:
+  - Rates are averages over each window between two scrapes (for totals, over the windows used); anything shorter than a window is not visible.
+  - p95 latencies are estimated from histogram buckets: the true value lies within the reported bucket bounds, and the estimate assumes requests are spread evenly within that bucket.
+  - Latency signals combine every response status of a route, including errors.
+  - Server-side signals count every request the service handled, from any client, not only this experiment's workload.
+  - k6's figures are measured on the client, include network time, and cover a different time span; they are reported separately and not reconciled with the server's.
+  - These are signals, not a diagnosis: no cause is inferred, and with a few windows no statistical significance is claimed.
+  - Windows that start before the workload or end after it include time without load, and the first and last windows during it include k6 starting and stopping.

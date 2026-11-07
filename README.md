@@ -35,8 +35,10 @@ report. It does not yet turn the samples into rates or percentiles. Item 3 does 
 Ruptiq Core has a health-check server; `ruptiq-run`, a command that runs one HTTP GET load test
 with [k6](https://k6.io) against any URL and reports what k6 measured; `ruptiq-compare`, which
 compares two saved `ruptiq-run` results offline; `ruptiq-telemetry`, which reads one snapshot
-of a target's Prometheus metrics; and `ruptiq-experiment`, which runs a k6 load test while
-sampling a Prometheus endpoint and saves both in one report. The checkout demo has three
+of a target's Prometheus metrics; `ruptiq-experiment`, which runs a k6 load test while
+sampling a Prometheus endpoint and saves both in one report; and `ruptiq-analyze`, which
+calculates server-side throughput, 5xx rates, and estimated latency percentiles from a saved
+experiment report, offline. The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
@@ -61,9 +63,10 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Inventory Service Prometheus metrics (`GET /metrics`) | Done; unit tested and inspected on a running service. Smoke-test checks added; they first run in CI on the pull request (Docker is not installed on the development machine) |
 | Prometheus telemetry reader (`ruptiq-telemetry`, one snapshot) | Done; unit tested against local test servers, and run against the real Inventory Service (see below) |
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
+| Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
-| Rates and percentiles from telemetry samples, investigation, run storage, load ramps | Not started |
+| Diagnosis (investigation of causes), run storage, load ramps | Not started |
 
 ## Requirements
 
@@ -731,8 +734,9 @@ experiment.
 ### Limitations
 
 - One HTTP GET workload and one Prometheus text-format endpoint per experiment.
-- Values are recorded as exposed. Nothing computes counter rates, differences between samples, or
-  histogram percentiles yet, and counter resets (a restarted service) are not detected.
+- Values are recorded as exposed: the report holds cumulative counters and histograms, not rates.
+  `ruptiq-analyze` (below) calculates rates and percentile estimates from a saved report, and
+  detects counter resets there.
 - Sampling is periodic, not continuous: anything shorter than the interval can fall between two
   samples, and the scrapes add a small load of their own to the target. Scrape timing follows the
   local clock and Go's ticker, so intervals are approximate (for example +1.006 s, +2.005 s).
@@ -747,6 +751,212 @@ experiment.
   The small "not retained" and error records are not counted.
 - Once the budget is reached, sampling stops for the rest of the experiment, including the scrape
   after the workload, even if later snapshots would have been smaller.
+
+## Analyze a saved experiment (`ruptiq-analyze`)
+
+`ruptiq-analyze` reads one saved `ruptiq-experiment` report and calculates performance signals
+from its telemetry samples: server-side request throughput per method and route, the share of
+HTTP 5xx responses, and estimated p95 latency from the duration histogram. It works offline on
+the saved file only; it never runs a load test or contacts the target.
+
+```sh
+go run ./cmd/ruptiq-analyze -in experiment.json -out analysis.json
+```
+
+The output below is from the deterministic test fixture
+`internal/analysis/testdata/inventory_experiment.json`: a synthetic Inventory Service
+experiment (made-up numbers, real metric names and bucket bounds) with GET 200s and 404s and
+POST 201s and 503s. It has not yet been run on a report from a real experiment.
+
+```text
+Experiment:   passed, telemetry complete (5 samples, 0 scrape errors, 0 not retained)
+  Target:     http://127.0.0.1:8082/inventory/LAPTOP-001
+  Metrics:    http://127.0.0.1:8082/metrics
+Windows:      4, covering 3.750s (samples #1 to #5); 0 span missed scrapes
+Client:       k6 (client side): 9000 requests, 2999.6 req/s, 0.00% failed, p95 0.680 ms (measured by the load generator)
+
+Server signals over all usable windows (inventory_http_requests_total, inventory_http_request_duration_seconds):
+  GET /inventory/{sku}
+    Throughput: 8040 requests in 3.750s = 2144.0 req/s (windows 1-4)
+    5xx:        0 of 8040 (0.00%); 4xx client errors, not counted as server errors: 40
+    Latency:    p95 ~0.989 ms (estimate; within the 0.500 ms to 1.000 ms bucket), mean 0.399 ms, 8040 requests
+  POST /reservations
+    Throughput: 106 requests in 3.750s = 28.3 req/s (windows 1-4)
+    5xx:        6 of 106 (5.66%); 4xx client errors, not counted as server errors: 0
+    Latency:    p95 ~27.917 ms (estimate; within the 25.000 ms to 50.000 ms bucket), mean 5.094 ms, 106 requests
+
+Windows:
+    1  #1->#2    1.002s  GET /inventory/{sku}: 2016.0 req/s, 5xx 0.00%, p95 ~0.989 ms
+    1  #1->#2    1.002s  POST /reservations: 41.9 req/s, 5xx 4.76%, p95 ~4.987 ms
+    ...
+    4  #4->#5    0.250s  GET /inventory/{sku}: 0.0 req/s, 5xx n/a, p95 n/a
+    4  #4->#5    0.250s  POST /reservations: 0.0 req/s, 5xx n/a, p95 n/a
+
+Limitations:
+  - Rates are averages over each window between two scrapes (for totals, over the windows used); anything shorter than a window is not visible.
+  ...
+```
+
+The summary shows derived signals only; it is capped at 20 routes, 20 window lines, and 10
+warnings, and the JSON file has everything.
+
+### Options
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-in` | (required) | Saved `ruptiq-experiment` report. |
+| `-out` | (none) | Also write the analysis as JSON to this file. Must not be the input. |
+| `-max-input-bytes` | `134217728` (128 MiB) | Largest report accepted, 1 KiB to 1 GiB. A report with the default 32 MiB retention budget is about 80 MiB as written. |
+| `-requests-metric` | `inventory_http_requests_total` | Counter of completed HTTP requests. |
+| `-duration-metric` | `inventory_http_request_duration_seconds` | Histogram of request durations, in seconds. |
+| `-method-label` | `method` | Label with the HTTP method. Empty: do not split by method. |
+| `-route-label` | `route` | Label with the route template (not a raw path). Empty: do not split by route. |
+| `-status-label` | `status` | Label with the HTTP status code. Empty: 5xx shares are unavailable. |
+| `-min-observations` | `20` | Fewest requests in a window (or in the totals) for a p95 estimate. |
+
+The defaults match the Inventory Service. Nothing else about it is assumed, so any Prometheus HTTP
+server with a request counter and a duration histogram can be analysed by naming its metrics and
+labels.
+
+### Cumulative metrics and rates
+
+Prometheus counters and histogram buckets are cumulative: `inventory_http_requests_total` is the
+number of requests since the service started, not a rate. Dividing it by the sampling interval
+gives a meaningless number. `ruptiq-analyze` works on **windows** instead: each pair of
+consecutive retained samples. For every series it takes the later value minus the earlier one,
+then divides by the time that actually passed between the two scrapes, from their timestamps,
+not the configured interval (scrapes drift: for example 1.002 s, 1.008 s, 1.490 s).
+
+- **Throughput** is the counter's increase in a window, summed over the route's statuses, divided
+  by the window's length.
+- **5xx share** is the increase of series whose status label is 500-599, divided by the route's
+  total increase. 4xx responses are client errors and are counted separately, never as server
+  errors. If any series has no numeric status, the share is unavailable rather than guessed.
+- **Totals** add up every window in which a route's signal was available, over the summed length
+  of those windows, and list the windows used and excluded.
+- **k6's figures** (client side, including network time, over k6's own time span) are copied
+  unchanged into `client` and never mixed with the server-side signals.
+
+### Missing and unusable evidence
+
+A value is never invented or assumed to be zero:
+
+- **A series that appears** in a window (present in the later sample, absent from the earlier)
+  has an unknown earlier value, so the route's signal for that window is unavailable. On a
+  freshly started service this is usual for the first window: Prometheus clients create a series
+  at its first request, so it is absent from the baseline sample.
+- **A series that disappears**, or **a counter that decreases** (the service probably
+  restarted), also makes the route's window unavailable. No negative throughput is ever reported.
+- **Failed or unretained scrapes** leave a longer window between the samples around them. Its
+  rate is the average over the whole span, and it lists the missed scrapes.
+- **A missing metric family** (or one of the wrong type) makes that signal unavailable.
+
+Each case is listed under `warnings` with the window, sample sequence, metric, and labels.
+
+### Why p95 is an estimate
+
+A histogram records how many requests fell in each bucket (for the Inventory Service, bounds from
+0.1 ms to 10 s), not the individual durations. For each window, `ruptiq-analyze` subtracts the
+earlier cumulative buckets from the later ones, after checking that the bucket bounds are the same
+and that no count decreased, and combines a route's statuses. It then finds the bucket containing
+the 95th percentile and interpolates linearly within it, as PromQL's `histogram_quantile` does.
+The true p95 lies somewhere in that bucket; the report gives the estimate and the bucket's bounds.
+p95 is unavailable, with a reason, when the window has fewer than `-min-observations` requests,
+when it lies in the `+Inf` bucket (above 10 s), or when the buckets cannot be compared. The mean
+(the increase of the histogram's sum divided by its count) is exact apart from rounding.
+
+### The JSON file
+
+```json
+{
+  "schema_version": 1,
+  "input": "experiment.json",
+  "analysis": {
+    "experiment": { "status": "passed", "telemetry_completeness": "complete", "samples": 5, ... },
+    "config": { "requests_counter": "inventory_http_requests_total", ... },
+    "client": { "source": "k6 (client side)", "metrics": { ... }, "passed": true },
+    "totals": [ { "method": "GET", "route": "/inventory/{sku}", "requests": { ... }, "latency": { ... } } ],
+    "windows": [
+      {
+        "index": 1,
+        "from": { "sequence": 1, "phase": "before_workload", "scraped_at": "...", "offset_seconds": 0 },
+        "to":   { "sequence": 2, "phase": "during_workload", "scraped_at": "...", "offset_seconds": 1.002 },
+        "elapsed_seconds": 1.002,
+        "missed_scrapes": [],
+        "routes": [
+          {
+            "method": "GET", "route": "/inventory/{sku}",
+            "requests": { "requests": 2020, "elapsed_seconds": 1.002, "per_second": 2015.97,
+                          "by_status": [ ... ], "server_errors_5xx": 0, "client_errors_4xx": 20,
+                          "unclassified_status": 0, "server_error_ratio": 0,
+                          "evidence": { "metric": "inventory_http_requests_total", "series": [ ... ] } },
+            "latency": { "observations": 2020, "mean_seconds": 0.0003980,
+                         "p95": { "quantile": 0.95, "estimate": true, "seconds": 0.000989,
+                                  "bucket_lower_seconds": 0.0005, "bucket_upper_seconds": 0.001 },
+                         "buckets": [ ... ], "evidence": { ... } }
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "limitations": [ ... ]
+  }
+}
+```
+
+- For each route, exactly one of `requests` and `requests_unavailable` is present, and likewise
+  for `latency`; `server_error_ratio`, `mean_seconds`, and `p95.seconds` are each replaced by an
+  `..._unavailable` / `unavailable` reason when they cannot be calculated.
+- `evidence` names the metric and the exact label sets used; with the window's `from` and `to`
+  (sequence numbers and timestamps), every number can be traced back to the experiment report.
+- `buckets` is the window's own histogram (cumulative counts of the requests completed in it).
+- If the report cannot be analysed, the file has `error` instead of `analysis`, so an older
+  analysis cannot be mistaken for the latest one.
+
+### Validation and exit status
+
+The report must be a complete, internally consistent `ruptiq-experiment` report with
+`schema_version` 1 and status `passed`, `failed`, or `incomplete`. Anything that cannot be
+interpreted safely is rejected, never repaired: unknown or missing fields, a missing or unknown
+schema version, scrape counts that disagree with the sample, error, and not-retained lists,
+sequence numbers that are missing, repeated, or out of order, timestamps out of order or outside
+the experiment, offsets that disagree with timestamps, a completeness or status that the data
+does not support, negative or non-finite counters, and histograms whose buckets are not
+cumulative or disagree with their count. Reports of `error`, `cancelled`, or `timed_out`
+experiments are refused, because their workload did not complete.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | The report was analysed (whatever the signals show). |
+| 2 | Invalid arguments. |
+| 3 | The report could not be read, is too large, invalid, unsupported, or records an experiment that did not complete; or the analysis could not be written. |
+
+### Safety
+
+- Read-only: only the input file is read. Nothing is sent anywhere.
+- URLs are redacted again (user information and query string replaced by `xxxxx`), and so is any
+  URL inside a label value or a scrape error, so credentials never reach the summary or the file.
+  Validation errors never quote the report's URLs, and a malformed timestamp or number is
+  reported without quoting its value.
+- The input size is bounded (`-max-input-bytes`), and the summary never prints raw telemetry.
+
+### Limitations
+
+- Signals are averages over windows of about one sampling interval; anything shorter is
+  invisible, and an experiment with a few windows says little about variability. No statistical
+  significance is calculated.
+- p95 values are estimates whose accuracy depends on the bucket bounds; with the Inventory
+  Service's buckets, a p95 between 0.5 ms and 1 ms is known only to lie in that range.
+- Server-side counters include every client's requests, not only the experiment's workload, and
+  are not reconciled with k6's counts (the scrapes and the load run start and stop at different
+  moments).
+- Latency combines all statuses of a route, including errors and 404s.
+- Windows that start before the load or end after it, and the first and last windows during it,
+  include time without full load.
+- Only one request counter and one duration histogram are analysed; other metrics (such as the
+  in-flight gauge or stock levels) are kept in the experiment report but not interpreted.
+- These are **signals, not a diagnosis**. A higher p95 or 5xx share in one window says what was
+  measured, not why. Ruptiq does not yet rank causes, explain changes, or compare experiments.
 
 ## Checkout demo with Docker Compose
 
@@ -1673,8 +1883,9 @@ go test -race ./...
 formatted.
 
 None of the tests need k6, Docker, or network access: the k6 adapter is tested against a fake k6
-program (the test binary itself) and saved k6 summaries, and the experiment coordinator against
-fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker.
+program (the test binary itself) and saved k6 summaries, the experiment coordinator against
+fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker, and
+the analyzer against synthetic experiment reports and the experiment package's saved report.
 
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
@@ -1695,6 +1906,7 @@ cmd/ruptiq-run/                          Ruptiq Core: load test command (flags, 
 cmd/ruptiq-compare/                      Ruptiq Core: run comparison command (flags, files, exit codes)
 cmd/ruptiq-telemetry/                    Ruptiq Core: telemetry snapshot command (flags, JSON file)
 cmd/ruptiq-experiment/                   Ruptiq Core: experiment command (flags, exit codes, JSON file)
+cmd/ruptiq-analyze/                      Ruptiq Core: offline analysis command (flags, files, exit codes)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
@@ -1704,6 +1916,9 @@ internal/telemetry/                      Ruptiq Core: TelemetryReader boundary, 
                                          Prometheus HTTP reader, console summary
 internal/experiment/                     Ruptiq Core: experiment coordinator (workload plus periodic
                                          telemetry sampling), report model, console summary
+internal/analysis/                       Ruptiq Core: reads and validates saved experiment reports,
+                                         per-window rates, 5xx shares, histogram p95 estimates,
+                                         console summary
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
   main.go                                  entry point, configuration, graceful shutdown
   internal/httpapi/                        HTTP routing, handlers, JSON errors

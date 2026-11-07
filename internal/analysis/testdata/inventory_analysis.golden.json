@@ -1,0 +1,1500 @@
+{
+  "schema_version": 1,
+  "input": "inventory_experiment.json",
+  "analysis": {
+    "experiment": {
+      "schema_version": 1,
+      "status": "passed",
+      "started_at": "2026-11-06T12:00:00Z",
+      "finished_at": "2026-11-06T12:00:04Z",
+      "target_url": "http://127.0.0.1:8082/inventory/LAPTOP-001",
+      "metrics_url": "http://127.0.0.1:8082/metrics",
+      "vus": 2,
+      "duration_seconds": 3,
+      "sample_interval_seconds": 1,
+      "telemetry_completeness": "complete",
+      "scrape_attempts": 5,
+      "samples": 5,
+      "scrape_errors": 0,
+      "not_retained": 0
+    },
+    "config": {
+      "requests_counter": "inventory_http_requests_total",
+      "duration_histogram": "inventory_http_request_duration_seconds",
+      "method_label": "method",
+      "route_label": "route",
+      "status_label": "status",
+      "min_observations": 20
+    },
+    "client": {
+      "source": "k6 (client side)",
+      "runner_version": "2.3.0",
+      "metrics": {
+        "duration_seconds": 3.0004,
+        "http_requests": 9000,
+        "failed_requests": 0,
+        "failure_rate": 0,
+        "requests_per_second": 2999.600053326223,
+        "latency_ms": {
+          "avg": 0.42,
+          "min": 0.1,
+          "p50": 0.4,
+          "p90": 0.6,
+          "p95": 0.68,
+          "max": 8.57
+        }
+      },
+      "passed": true
+    },
+    "totals": [
+      {
+        "method": "GET",
+        "route": "/inventory/{sku}",
+        "requests": {
+          "requests": 8040,
+          "elapsed_seconds": 3.75,
+          "per_second": 2144,
+          "by_status": [
+            {
+              "status": "200",
+              "requests": 8000
+            },
+            {
+              "status": "404",
+              "requests": 40
+            }
+          ],
+          "server_errors_5xx": 0,
+          "client_errors_4xx": 40,
+          "unclassified_status": 0,
+          "server_error_ratio": 0,
+          "evidence": {
+            "metric": "inventory_http_requests_total",
+            "windows": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "series": [
+              {
+                "method": "GET",
+                "route": "/inventory/{sku}",
+                "status": "200"
+              },
+              {
+                "method": "GET",
+                "route": "/inventory/{sku}",
+                "status": "404"
+              }
+            ]
+          }
+        },
+        "latency": {
+          "observations": 8040,
+          "mean_seconds": 0.0003990049751243781,
+          "p95": {
+            "quantile": 0.95,
+            "estimate": true,
+            "seconds": 0.000988858695652174,
+            "bucket_lower_seconds": 0.0005,
+            "bucket_upper_seconds": 0.001
+          },
+          "buckets": [
+            {
+              "upper_bound": 0.0001,
+              "cumulative_count": 0
+            },
+            {
+              "upper_bound": 0.00025,
+              "cumulative_count": 2020
+            },
+            {
+              "upper_bound": 0.0005,
+              "cumulative_count": 4040
+            },
+            {
+              "upper_bound": 0.001,
+              "cumulative_count": 7720
+            },
+            {
+              "upper_bound": 0.0025,
+              "cumulative_count": 7880
+            },
+            {
+              "upper_bound": 0.005,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.01,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.025,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.05,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.1,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.25,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 0.5,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 1,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 2.5,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 5,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": 10,
+              "cumulative_count": 8040
+            },
+            {
+              "upper_bound": "+Inf",
+              "cumulative_count": 8040
+            }
+          ],
+          "evidence": {
+            "metric": "inventory_http_request_duration_seconds",
+            "windows": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "series": [
+              {
+                "method": "GET",
+                "route": "/inventory/{sku}",
+                "status": "200"
+              },
+              {
+                "method": "GET",
+                "route": "/inventory/{sku}",
+                "status": "404"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "method": "POST",
+        "route": "/reservations",
+        "requests": {
+          "requests": 106,
+          "elapsed_seconds": 3.75,
+          "per_second": 28.266666666666666,
+          "by_status": [
+            {
+              "status": "201",
+              "requests": 100
+            },
+            {
+              "status": "503",
+              "requests": 6
+            }
+          ],
+          "server_errors_5xx": 6,
+          "client_errors_4xx": 0,
+          "unclassified_status": 0,
+          "server_error_ratio": 0.05660377358490566,
+          "evidence": {
+            "metric": "inventory_http_requests_total",
+            "windows": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "series": [
+              {
+                "method": "POST",
+                "route": "/reservations",
+                "status": "201"
+              },
+              {
+                "method": "POST",
+                "route": "/reservations",
+                "status": "503"
+              }
+            ]
+          }
+        },
+        "latency": {
+          "observations": 106,
+          "mean_seconds": 0.005094339622641509,
+          "p95": {
+            "quantile": 0.95,
+            "estimate": true,
+            "seconds": 0.02791666666666662,
+            "bucket_lower_seconds": 0.025,
+            "bucket_upper_seconds": 0.05
+          },
+          "buckets": [
+            {
+              "upper_bound": 0.0001,
+              "cumulative_count": 0
+            },
+            {
+              "upper_bound": 0.00025,
+              "cumulative_count": 0
+            },
+            {
+              "upper_bound": 0.0005,
+              "cumulative_count": 0
+            },
+            {
+              "upper_bound": 0.001,
+              "cumulative_count": 0
+            },
+            {
+              "upper_bound": 0.0025,
+              "cumulative_count": 50
+            },
+            {
+              "upper_bound": 0.005,
+              "cumulative_count": 100
+            },
+            {
+              "upper_bound": 0.01,
+              "cumulative_count": 100
+            },
+            {
+              "upper_bound": 0.025,
+              "cumulative_count": 100
+            },
+            {
+              "upper_bound": 0.05,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 0.1,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 0.25,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 0.5,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 1,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 2.5,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 5,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": 10,
+              "cumulative_count": 106
+            },
+            {
+              "upper_bound": "+Inf",
+              "cumulative_count": 106
+            }
+          ],
+          "evidence": {
+            "metric": "inventory_http_request_duration_seconds",
+            "windows": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "series": [
+              {
+                "method": "POST",
+                "route": "/reservations",
+                "status": "201"
+              },
+              {
+                "method": "POST",
+                "route": "/reservations",
+                "status": "503"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "windows": [
+      {
+        "index": 1,
+        "from": {
+          "sequence": 1,
+          "phase": "before_workload",
+          "scraped_at": "2026-11-06T12:00:00Z",
+          "offset_seconds": 0
+        },
+        "to": {
+          "sequence": 2,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:01.002Z",
+          "offset_seconds": 1.002
+        },
+        "elapsed_seconds": 1.002,
+        "missed_scrapes": [],
+        "routes": [
+          {
+            "method": "GET",
+            "route": "/inventory/{sku}",
+            "requests": {
+              "requests": 2020,
+              "elapsed_seconds": 1.002,
+              "per_second": 2015.9680638722555,
+              "by_status": [
+                {
+                  "status": "200",
+                  "requests": 2000
+                },
+                {
+                  "status": "404",
+                  "requests": 20
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 20,
+              "unclassified_status": 0,
+              "server_error_ratio": 0,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 2020,
+              "mean_seconds": 0.000398019801980198,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.000988586956521739,
+                "bucket_lower_seconds": 0.0005,
+                "bucket_upper_seconds": 0.001
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 510
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 1020
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 1940
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 1980
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 2020
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 2020
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "method": "POST",
+            "route": "/reservations",
+            "requests": {
+              "requests": 42,
+              "elapsed_seconds": 1.002,
+              "per_second": 41.91616766467066,
+              "by_status": [
+                {
+                  "status": "201",
+                  "requests": 40
+                },
+                {
+                  "status": "503",
+                  "requests": 2
+                }
+              ],
+              "server_errors_5xx": 2,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio": 0.047619047619047616,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 42,
+              "mean_seconds": 0.004761904761904762,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.0049875,
+                "bucket_lower_seconds": 0.0025,
+                "bucket_upper_seconds": 0.005
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 20
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 42
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 42
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "from": {
+          "sequence": 2,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:01.002Z",
+          "offset_seconds": 1.002
+        },
+        "to": {
+          "sequence": 3,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:02.01Z",
+          "offset_seconds": 2.01
+        },
+        "elapsed_seconds": 1.008,
+        "missed_scrapes": [],
+        "routes": [
+          {
+            "method": "GET",
+            "route": "/inventory/{sku}",
+            "requests": {
+              "requests": 3000,
+              "elapsed_seconds": 1.008,
+              "per_second": 2976.190476190476,
+              "by_status": [
+                {
+                  "status": "200",
+                  "requests": 3000
+                },
+                {
+                  "status": "404",
+                  "requests": 0
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio": 0,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 3000,
+              "mean_seconds": 0.00039999999999999996,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.0009891304347826087,
+                "bucket_lower_seconds": 0.0005,
+                "bucket_upper_seconds": 0.001
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 750
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 1500
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 2880
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 2940
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 3000
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 3000
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "method": "POST",
+            "route": "/reservations",
+            "requests": {
+              "requests": 40,
+              "elapsed_seconds": 1.008,
+              "per_second": 39.682539682539684,
+              "by_status": [
+                {
+                  "status": "201",
+                  "requests": 40
+                },
+                {
+                  "status": "503",
+                  "requests": 0
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio": 0,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 40,
+              "mean_seconds": 0.0030000000000000014,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.00475,
+                "bucket_lower_seconds": 0.0025,
+                "bucket_upper_seconds": 0.005
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 20
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 40
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 40
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "from": {
+          "sequence": 3,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:02.01Z",
+          "offset_seconds": 2.01
+        },
+        "to": {
+          "sequence": 4,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:03.5Z",
+          "offset_seconds": 3.5
+        },
+        "elapsed_seconds": 1.49,
+        "missed_scrapes": [],
+        "routes": [
+          {
+            "method": "GET",
+            "route": "/inventory/{sku}",
+            "requests": {
+              "requests": 3020,
+              "elapsed_seconds": 1.49,
+              "per_second": 2026.8456375838925,
+              "by_status": [
+                {
+                  "status": "200",
+                  "requests": 3000
+                },
+                {
+                  "status": "404",
+                  "requests": 20
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 20,
+              "unclassified_status": 0,
+              "server_error_ratio": 0,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 3020,
+              "mean_seconds": 0.00039867549668874176,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.000988768115942029,
+                "bucket_lower_seconds": 0.0005,
+                "bucket_upper_seconds": 0.001
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 760
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 1520
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 2900
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 2960
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 3020
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 3020
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "method": "POST",
+            "route": "/reservations",
+            "requests": {
+              "requests": 24,
+              "elapsed_seconds": 1.49,
+              "per_second": 16.107382550335572,
+              "by_status": [
+                {
+                  "status": "201",
+                  "requests": 20
+                },
+                {
+                  "status": "503",
+                  "requests": 4
+                }
+              ],
+              "server_errors_5xx": 4,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio": 0.16666666666666666,
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 24,
+              "mean_seconds": 0.009166666666666665,
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "seconds": 0.04249999999999998,
+                "bucket_lower_seconds": 0.025,
+                "bucket_upper_seconds": 0.05
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 10
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 20
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 20
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 20
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 24
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 24
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "from": {
+          "sequence": 4,
+          "phase": "during_workload",
+          "scraped_at": "2026-11-06T12:00:03.5Z",
+          "offset_seconds": 3.5
+        },
+        "to": {
+          "sequence": 5,
+          "phase": "after_workload",
+          "scraped_at": "2026-11-06T12:00:03.75Z",
+          "offset_seconds": 3.75
+        },
+        "elapsed_seconds": 0.25,
+        "missed_scrapes": [],
+        "routes": [
+          {
+            "method": "GET",
+            "route": "/inventory/{sku}",
+            "requests": {
+              "requests": 0,
+              "elapsed_seconds": 0.25,
+              "per_second": 0,
+              "by_status": [
+                {
+                  "status": "200",
+                  "requests": 0
+                },
+                {
+                  "status": "404",
+                  "requests": 0
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio_unavailable": "no requests were completed",
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 0,
+              "mean_seconds_unavailable": "no requests were completed",
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "unavailable": "no requests were completed"
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 0
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "200"
+                  },
+                  {
+                    "method": "GET",
+                    "route": "/inventory/{sku}",
+                    "status": "404"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "method": "POST",
+            "route": "/reservations",
+            "requests": {
+              "requests": 0,
+              "elapsed_seconds": 0.25,
+              "per_second": 0,
+              "by_status": [
+                {
+                  "status": "201",
+                  "requests": 0
+                },
+                {
+                  "status": "503",
+                  "requests": 0
+                }
+              ],
+              "server_errors_5xx": 0,
+              "client_errors_4xx": 0,
+              "unclassified_status": 0,
+              "server_error_ratio_unavailable": "no requests were completed",
+              "evidence": {
+                "metric": "inventory_http_requests_total",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            },
+            "latency": {
+              "observations": 0,
+              "mean_seconds_unavailable": "no requests were completed",
+              "p95": {
+                "quantile": 0.95,
+                "estimate": true,
+                "unavailable": "no requests were completed"
+              },
+              "buckets": [
+                {
+                  "upper_bound": 0.0001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.00025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.001,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.0025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.005,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.01,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.025,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.05,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.1,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.25,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 0.5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 1,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 2.5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 5,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": 10,
+                  "cumulative_count": 0
+                },
+                {
+                  "upper_bound": "+Inf",
+                  "cumulative_count": 0
+                }
+              ],
+              "evidence": {
+                "metric": "inventory_http_request_duration_seconds",
+                "series": [
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "201"
+                  },
+                  {
+                    "method": "POST",
+                    "route": "/reservations",
+                    "status": "503"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "warnings": [],
+    "limitations": [
+      "Rates are averages over each window between two scrapes (for totals, over the windows used); anything shorter than a window is not visible.",
+      "p95 latencies are estimated from histogram buckets: the true value lies within the reported bucket bounds, and the estimate assumes requests are spread evenly within that bucket.",
+      "Latency signals combine every response status of a route, including errors.",
+      "Server-side signals count every request the service handled, from any client, not only this experiment's workload.",
+      "k6's figures are measured on the client, include network time, and cover a different time span; they are reported separately and not reconciled with the server's.",
+      "These are signals, not a diagnosis: no cause is inferred, and with a few windows no statistical significance is claimed.",
+      "Windows that start before the workload or end after it include time without load, and the first and last windows during it include k6 starting and stopping."
+    ]
+  }
+}
