@@ -70,10 +70,11 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
 | Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, run offline on the synthetic experiment, and run on a live controlled change from `demo/regression-lab/` (see below) |
+| Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis. An observed difference is not a cause and not a reproducibility result |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
-| Root-cause diagnosis, comparison of experiments, run storage, load ramps | Not started |
+| Root-cause diagnosis, run storage, load ramps | Not started |
 
 ## Requirements
 
@@ -964,7 +965,7 @@ experiments are refused, because their workload did not complete.
   in-flight gauge or stock levels) are kept in the experiment report but not interpreted.
 - These are **signals, not a diagnosis**. A higher p95 or 5xx share in one window says what was
   measured, not why. `ruptiq-investigate` (below) compares the windows and ranks the changes it
-  finds, but it does not identify causes or compare experiments either.
+  finds, but it does not identify causes. `ruptiq-validate-fix` (below) compares two saved analyses and still does not identify a cause.
 
 ## Investigate a saved analysis (`ruptiq-investigate`)
 
@@ -1212,6 +1213,131 @@ routes, and evidence for the wrong metric. Up to 10 problems are listed.
 - Until the regression lab (below), it had been run only on synthetic data. One live run against
   that lab is recorded there; it is still not a comparison between versions or a root-cause
   diagnosis.
+
+## Compare a baseline and a candidate (`ruptiq-validate-fix`)
+
+`ruptiq-validate-fix` reads two analyses saved with `ruptiq-analyze -out` and compares matching
+methods and routes. Use it after a proposed fix: one file is the baseline experiment, the other
+is a later experiment collected the same way. It works offline on those files only. It does not
+change code, and it does not decide whether the fix worked.
+
+Three different claims have to stay separate:
+
+| Claim | What this command does |
+| --- | --- |
+| An observed difference between one before run and one after run | This is the result `ruptiq-validate-fix` can report. |
+| A difference that shows up again when both experiments are repeated | Not shown. One pair of files cannot show that. |
+| Proof that a code change caused the difference | Not shown. The tool has no change set, no resource metrics, and no significance test. |
+
+### Collect two comparable experiments
+
+Run the same workload twice, once before the change and once after, and analyse each report with
+the same metric names:
+
+```sh
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8082/inventory/LAPTOP-001 -metrics-url http://127.0.0.1:8082/metrics -vus 2 -duration 20s -interval 1s -out tmp/before-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/before-experiment.json -out tmp/before-analysis.json
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8082/inventory/LAPTOP-001 -metrics-url http://127.0.0.1:8082/metrics -vus 2 -duration 20s -interval 1s -out tmp/after-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/after-experiment.json -out tmp/after-analysis.json
+go run ./cmd/ruptiq-validate-fix -before tmp/before-analysis.json -after tmp/after-analysis.json -out tmp/validation.json
+```
+
+`tmp/` is gitignored. The two experiments must use the same VUs, the same configured duration,
+the same sampling interval, and the same Prometheus counter, histogram, and label names. The
+comparison also checks the target URL that the analysis saved. That saved URL has already had
+its user information and query string replaced, so only the scheme, host, and path can be
+checked. If either URL still shows a query string or user information, including the redacted
+placeholder, the report warns that those parts were not compared. A match does not prove the
+original targets or workload parameters were the same.
+
+A route that exists on only one side is reported as missing. It is not treated as zero traffic.
+k6's client latency and request rate are copied into the JSON for context and are not mixed into
+the server-side numbers.
+
+Matching flags do not make the machines, caches, or background load the same. The report says so.
+
+### What is compared
+
+Only windows taken entirely during the workload, with no missed scrapes, are eligible. A signal
+also has to be present in that window. Counter resets, disappeared series, and histogram bucket
+changes exclude the window. The default is at least two eligible windows on each side.
+
+- **Throughput** is the total of completed requests in the eligible windows divided by the total
+  time those windows actually covered. Per-window rates are not averaged, and cumulative counters
+  are not averaged.
+- **5xx ratio** pools server errors and completed requests. The change is reported in percentage
+  points. 4xx responses stay in their own count. When a side completed no requests, that side's
+  ratio is left null and the summary says it is undefined. A printed 0% is a side that completed
+  requests and had no 5xx responses.
+- **Latency** is the median of the per-window p95 estimates. That is not the p95 of the whole
+  experiment. Each estimate keeps its histogram bucket bounds. If the before and after bucket
+  ranges overlap, the comparison stays inconclusive. It does not become an improvement, a
+  regression, or `no_material_change` on its own.
+
+### Outcomes
+
+| Outcome | Meaning |
+| --- | --- |
+| `improvement_observed` | Every material change is an improvement. This is still one observation. |
+| `regression_observed` | At least one material change is a regression, and none is an improvement. |
+| `mixed` | At least one material improvement and one material regression. |
+| `no_material_change` | At least one signal was judged, and every judged signal stayed inside its threshold. An inconclusive p95 does not supply that judgment. |
+| `insufficient_evidence` | No signal could be judged. That includes too few windows, too few requests, a missing route, and a comparison whose only threshold crossing is an inconclusive p95. |
+| `not_comparable` | VUs, duration, interval, the comparable part of the target URL, or metric configuration differ. No route is treated as equivalent. |
+
+The default thresholds are the same kind of fixed rules used by `ruptiq-investigate`: throughput
+±30%, 5xx ratio ±1 percentage point and twice the better side when that side is not zero (and at
+least 5 server errors on the worse side), and median per-window p95 ±50%. They are not a
+significance test. Flags can change them.
+
+### Synthetic examples
+
+These numbers come from the package tests, not from a live service.
+
+A route that does 1000 requests in each of two 1-second windows, with every window p95 estimated
+at 20 ms inside the bucket from 10 ms to 25 ms, then 1400 requests per window with every window
+p95 at 4 ms inside the bucket from 2 ms to 5 ms:
+
+| Signal | Before | After | Change | Result |
+| --- | --- | --- | --- | --- |
+| Throughput | 1000.0 requests/s | 1400.0 requests/s | +400 requests/s, +40% | improvement |
+| 5xx ratio | 0% | 0% | 0 points | no material change |
+| Median window p95 | 20 ms | 4 ms | −80% | improvement, because the buckets do not overlap |
+
+The outcome is `improvement_observed`. The same shape with the numbers reversed is
+`regression_observed`. A higher request rate together with a higher 5xx ratio is `mixed`.
+
+The checked-in inventory analysis compared with itself is `no_material_change`. Its two eligible
+windows are windows 2 and 3 (windows 1 and 4 touch the start or the end of the load). For
+`GET /inventory/{sku}` those windows contain 3000 and 3020 requests over 1.008 s and 1.490 s, so
+the pooled rate is 6020 / 2.498 s = 2410.7 requests/s on both sides, not the average of the two
+window rates. The 20 responses counted as 404 stay out of the 5xx ratio, which is 0. POST `/reservations` has 64 requests across those windows, below the default of 100, so that route is
+`insufficient_evidence` rather than a claim that nothing changed. k6's 9000 client requests are
+not used.
+
+### Validation and exit status
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | The analyses were compared, including `not_comparable` and `insufficient_evidence`. |
+| 2 | Invalid arguments or thresholds. |
+| 3 | An analysis could not be read, is too large, invalid, unsupported, or records a failed analysis; or the validation file could not be written. |
+
+`-out` is written through a temporary file in the same directory and is refused when it names
+either input. URLs lose their user information and query string. The input size is bounded.
+
+### Limitations
+
+- One pair of experiments cannot show repeatability or a cause.
+- There is no confidence percentage and no significance test.
+- Short runs often end as `insufficient_evidence` because two eligible windows per file is the
+  default floor, and each judged throughput baseline needs at least 100 requests.
+- A p95 that moves inside overlapping buckets is inconclusive even when the estimates differ by
+  more than 50%. That signal does not become an improvement, a regression, or `no_material_change`.
+  If nothing else could be judged, the route and the overall outcome are `insufficient_evidence`.
+  A judged throughput or 5xx result is kept, and the summary says the latency direction was not claimed.
+- Different histogram bucket boundaries are reported as incompatible and are not turned into a
+  latency verdict.
 
 ## Validate the pipeline with a controlled change (`demo/regression-lab`)
 
@@ -2262,7 +2388,8 @@ program (the test binary itself) and saved k6 summaries, the experiment coordina
 fake workload runners, fake telemetry readers, a fake clock, and a manually driven ticker, the
 analyzer against synthetic experiment reports and the experiment package's saved report, and the
 investigator against fake analyses, the saved analysis of the synthetic experiment, and an offline
-experiment-to-analysis-to-investigation chain. The regression lab's tests hit its own handler only;
+experiment-to-analysis-to-investigation chain. The before/after comparison is tested against fake
+analyses and against that same saved analysis used as both inputs. The regression lab's tests hit its own handler only;
 they do not run k6.
 
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
@@ -2286,6 +2413,7 @@ cmd/ruptiq-telemetry/                    Ruptiq Core: telemetry snapshot command
 cmd/ruptiq-experiment/                   Ruptiq Core: experiment command (flags, exit codes, JSON file)
 cmd/ruptiq-analyze/                      Ruptiq Core: offline analysis command (flags, files, exit codes)
 cmd/ruptiq-investigate/                  Ruptiq Core: offline investigation command (flags, files, exit codes)
+cmd/ruptiq-validate-fix/                 Ruptiq Core: before/after analysis comparison (flags, files, exit codes)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
@@ -2301,6 +2429,10 @@ internal/analysis/                       Ruptiq Core: reads and validates saved 
 internal/investigation/                  Ruptiq Core: reads and validates saved analyses, compares
                                          earlier and later windows, ranked findings with evidence
                                          references, console summary
+internal/fixvalidation/                  Ruptiq Core: compares a baseline analysis with a candidate
+                                         analysis; server throughput, 5xx ratio, and median window
+                                         p95, with evidence pointers. Not a cause and not a
+                                         significance test
 demo/regression-lab/                     Validation fixture (NOT Ruptiq Core, not checkout): loopback
                                          HTTP target with real CPU work and Prometheus metrics
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
