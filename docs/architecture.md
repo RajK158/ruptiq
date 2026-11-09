@@ -929,11 +929,16 @@ only windows whose samples are both `during_workload` and which have no missed s
 - Throughput is total completed requests divided by total elapsed time. A window of three seconds
   counts three times a window of one second. The mean of the per-window rates is not used.
 - The 5xx ratio pools `server_errors_5xx` and completed requests. 4xx counts are reported beside
-  it and do not enter the ratio.
+  it and do not enter the ratio. A side with no completed requests stores a null ratio and
+  `value_unavailable`; the request count, 5xx count, and window evidence stay. A ratio of 0 is
+  stored only when that side completed requests.
 - Latency is the median of the eligible windows' p95 estimates. An even count uses the mean of
   the two central estimates. The value is labeled as that median, not as the experiment-wide p95.
-  The union of the windows' bucket bounds is kept. Overlapping ranges, or histogram boundaries
-  that differ between the files, do not become an improvement or a regression.
+  The union of the windows' bucket bounds is kept. Overlapping ranges stay `inconclusive`: they
+  do not become an improvement, a regression, or `no_material_change`. If no other signal can be
+  judged, the route and the overall outcome are `insufficient_evidence`. A judged signal on the
+  same comparison is kept, and the summary names the inconclusive latency comparison. Histogram
+  boundaries that differ between the files stay incompatible.
 
 A route that is absent from one file stays absent. It is not filled with zeros. Fewer than two
 eligible windows on a side, or fewer completed requests than the configured floor, is

@@ -78,22 +78,55 @@ func signalLine(s *SignalComparison) string {
 		if s.PercentagePoints != nil {
 			pp = fmt.Sprintf(", %s points", signedPoints(*s.PercentagePoints/100))
 		}
-		return fmt.Sprintf("%s → %s%s [%s]; %s", ratioText(s.Before.Value), ratioText(s.After.Value), pp, s.Status, s.Reason)
+		return fmt.Sprintf("%s → %s%s [%s]; %s", ratioLabel(s.Before), ratioLabel(s.After), pp, s.Status, s.Reason)
 	case SignalLatency:
+		before, okB := definedValue(s.Before)
+		after, okA := definedValue(s.After)
+		if !okB || !okA {
+			return s.Status + ": " + s.Reason
+		}
 		bounds := ""
 		if s.Before.BucketLowerSeconds != nil && s.After.BucketLowerSeconds != nil {
 			bounds = fmt.Sprintf("; buckets [%s, %s] → [%s, %s]",
 				seconds(*s.Before.BucketLowerSeconds), seconds(*s.Before.BucketUpperSeconds),
 				seconds(*s.After.BucketLowerSeconds), seconds(*s.After.BucketUpperSeconds))
 		}
-		return fmt.Sprintf("%s → %s [%s]%s", seconds(s.Before.Value), seconds(s.After.Value), s.Status, bounds)
+		return fmt.Sprintf("%s → %s [%s]%s", seconds(before), seconds(after), s.Status, bounds)
 	default:
+		before, okB := definedValue(s.Before)
+		after, okA := definedValue(s.After)
+		if !okB || !okA {
+			return s.Status + ": " + s.Reason
+		}
 		rel := ""
 		if s.Relative != nil {
 			rel = ", " + percent(*s.Relative)
 		}
-		return fmt.Sprintf("%s → %s%s [%s]", rate(s.Before.Value), rate(s.After.Value), rel, s.Status)
+		return fmt.Sprintf("%s → %s%s [%s]", rate(before), rate(after), rel, s.Status)
 	}
+}
+
+func definedValue(m *Measure) (float64, bool) {
+	if m == nil || m.Value == nil {
+		return 0, false
+	}
+	return *m.Value, true
+}
+
+// ratioLabel prints a real 5xx ratio, including 0% when requests were
+// completed. A nil value is an undefined ratio, which is not printed as 0%.
+func ratioLabel(m *Measure) string {
+	if m == nil || m.Value == nil {
+		if m == nil {
+			return "undefined"
+		}
+		errors := 0.0
+		if m.ServerErrors != nil {
+			errors = *m.ServerErrors
+		}
+		return fmt.Sprintf("undefined (%g requests, %g 5xx)", m.Requests, errors)
+	}
+	return ratioText(*m.Value)
 }
 
 func changeText(c RankedChange) string {

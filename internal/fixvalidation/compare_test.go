@@ -240,6 +240,14 @@ func near(t *testing.T, got, want float64) {
 	}
 }
 
+func mustValue(t *testing.T, m *Measure) float64 {
+	t.Helper()
+	if m == nil || m.Value == nil {
+		t.Fatalf("expected a defined measurement, got %+v", m)
+	}
+	return *m.Value
+}
+
 func TestImprovement(t *testing.T) {
 	// Two 1s windows of 1000 requests at p95 20ms, then two of 1400 at p95 4ms.
 	// Throughput 1000 → 1400 requests/s (+40%). Latency buckets do not overlap.
@@ -253,12 +261,12 @@ func TestImprovement(t *testing.T) {
 	if r.Throughput.Status != StatusImprovement || r.Latency.Status != StatusImprovement || r.ServerErrors.Status != StatusNoMaterialChange {
 		t.Fatalf("signals %s %s %s", r.Throughput.Status, r.ServerErrors.Status, r.Latency.Status)
 	}
-	near(t, r.Throughput.Before.Value, 1000)
-	near(t, r.Throughput.After.Value, 1400)
+	near(t, mustValue(t, r.Throughput.Before), 1000)
+	near(t, mustValue(t, r.Throughput.After), 1400)
 	near(t, *r.Throughput.Absolute, 400)
 	near(t, *r.Throughput.Relative, 0.4)
-	near(t, r.Latency.Before.Value, 0.020)
-	near(t, r.Latency.After.Value, 0.004)
+	near(t, mustValue(t, r.Latency.Before), 0.020)
+	near(t, mustValue(t, r.Latency.After), 0.004)
 	near(t, *r.Latency.Relative, -0.8)
 	if !r.Latency.Before.Estimate || !strings.Contains(r.Latency.Statistic, "not an experiment-wide p95") {
 		t.Fatalf("latency statistic %q estimate %v", r.Latency.Statistic, r.Latency.Before.Estimate)
@@ -287,8 +295,8 @@ func TestRegressionAndMixed(t *testing.T) {
 	if r.Throughput.Status != StatusRegression || r.ServerErrors.Status != StatusRegression || r.Latency.Status != StatusRegression {
 		t.Fatalf("signals %s %s %s (%s)", r.Throughput.Status, r.ServerErrors.Status, r.Latency.Status, r.ServerErrors.Reason)
 	}
-	near(t, r.Throughput.Before.Value, 1000)
-	near(t, r.Throughput.After.Value, 650)
+	near(t, mustValue(t, r.Throughput.Before), 1000)
+	near(t, mustValue(t, r.Throughput.After), 650)
 	near(t, *r.ServerErrors.PercentagePoints, 50.0/650.0*100-0)
 
 	// Throughput improves and the 5xx ratio gets worse: mixed, regressions ranked first.
@@ -347,9 +355,9 @@ func TestThroughputUsesTotalTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := route(v, "GET", "/work")
-	near(t, r.Throughput.Before.Value, 25)
-	near(t, r.Throughput.After.Value, 100)
-	if r.Throughput.Before.Value == 50 {
+	near(t, mustValue(t, r.Throughput.Before), 25)
+	near(t, mustValue(t, r.Throughput.After), 100)
+	if mustValue(t, r.Throughput.Before) == 50 {
 		t.Fatal("throughput averaged per-window rates")
 	}
 	near(t, *r.Throughput.Relative, 3)
@@ -365,6 +373,12 @@ func TestZeroRequestsAndZeroErrorBaseline(t *testing.T) {
 	if r.ServerErrors.Status != StatusInsufficient || r.ServerErrors.Relative != nil {
 		t.Fatalf("zero errors %+v", r.ServerErrors)
 	}
+	if r.ServerErrors.Before.Value != nil || r.ServerErrors.After.Value != nil {
+		t.Fatalf("undefined 5xx ratio stored as a number: before %+v after %+v", r.ServerErrors.Before, r.ServerErrors.After)
+	}
+	if r.Throughput.Before.Value == nil || *r.Throughput.Before.Value != 0 {
+		t.Fatalf("zero throughput lost its measured rate: %+v", r.Throughput.Before)
+	}
 	if strings.Contains(r.Throughput.Reason, "improvement") && strings.Contains(r.Throughput.Reason, "material improvement") == false {
 		// reason must say this is not an improvement
 	}
@@ -379,8 +393,8 @@ func TestZeroRequestsAndZeroErrorBaseline(t *testing.T) {
 	if er.Status != StatusRegression {
 		t.Fatalf("zero-baseline errors: %s (%s)", er.Status, er.Reason)
 	}
-	near(t, er.Before.Value, 0)
-	near(t, er.After.Value, 0.02)
+	near(t, mustValue(t, er.Before), 0)
+	near(t, mustValue(t, er.After), 0.02)
 	near(t, *er.PercentagePoints, 2)
 }
 
@@ -394,7 +408,7 @@ func TestClientErrorsAreNotServerErrors(t *testing.T) {
 	if r.ServerErrors.After.ClientErrors == nil || *r.ServerErrors.After.ClientErrors != 200 {
 		t.Fatalf("4xx %+v", r.ServerErrors.After)
 	}
-	if r.ServerErrors.After.Value != 0 {
+	if mustValue(t, r.ServerErrors.After) != 0 {
 		t.Fatalf("5xx ratio %v", r.ServerErrors.After.Value)
 	}
 }
@@ -436,7 +450,7 @@ func TestScrapeGapResetAndBoundary(t *testing.T) {
 	)
 	v := mustCompare(t, gap, build(pair(2, base)...))
 	r := route(v, "GET", "/work")
-	if r.Throughput.Before.Windows != 2 || r.Throughput.Before.Value != 1000 {
+	if r.Throughput.Before.Windows != 2 || mustValue(t, r.Throughput.Before) != 1000 {
 		t.Fatalf("gap leaked into the rate: %+v excluded %+v", r.Throughput.Before, r.Throughput.ExcludedBefore)
 	}
 	foundGap := false
@@ -457,7 +471,7 @@ func TestScrapeGapResetAndBoundary(t *testing.T) {
 	})
 	got := mustCompare(t, reset, build(pair(2, base)...))
 	tr := route(got, "GET", "/work").Throughput
-	if tr.Before.Windows != 2 || tr.Before.Value != 1000 {
+	if tr.Before.Windows != 2 || mustValue(t, tr.Before) != 1000 {
 		t.Fatalf("reset window included: %+v excluded %+v", tr.Before, tr.ExcludedBefore)
 	}
 	foundReset := false
@@ -477,7 +491,7 @@ func TestScrapeGapResetAndBoundary(t *testing.T) {
 		w(base.requests(0, 0, 0)).phases(experiment.DuringWorkload, experiment.AfterWorkload),
 	)
 	edgeV := mustCompare(t, edge, build(pair(2, base)...))
-	if route(edgeV, "GET", "/work").Throughput.Before.Value != 1000 {
+	if mustValue(t, route(edgeV, "GET", "/work").Throughput.Before) != 1000 {
 		t.Fatalf("boundary window changed the rate: %+v", route(edgeV, "GET", "/work").Throughput.Before)
 	}
 	if len(edgeV.Before.EligibleWindows) != 2 || edgeV.Before.EligibleWindows[0] != 2 {
@@ -488,15 +502,32 @@ func TestScrapeGapResetAndBoundary(t *testing.T) {
 func TestHistogramOverlapAndIncompatibleBuckets(t *testing.T) {
 	before := build(pair(2, rt("GET", "/work").latency(0.020, 0.010, 0.050))...)
 	after := build(pair(2, rt("GET", "/work").latency(0.008, 0.005, 0.020))...)
-	r := route(mustCompare(t, before, after), "GET", "/work")
+	v := mustCompare(t, before, after)
+	r := route(v, "GET", "/work")
 	if r.Latency.Status != StatusInconclusive {
 		t.Fatalf("status %s (%s)", r.Latency.Status, r.Latency.Reason)
 	}
 	if r.Outcome == OutcomeImprovement || r.Latency.Status == StatusImprovement {
 		t.Fatal("overlapping buckets were called an improvement")
 	}
-	if r.Outcome != OutcomeNoMaterialChange {
-		t.Fatalf("route outcome %s", r.Outcome)
+	// Throughput and the 5xx ratio are unchanged at 1000 requests and 0 errors.
+	// Those judged signals keep no_material_change. The overlapping p95 does not.
+	if r.Throughput.Status != StatusNoMaterialChange || r.ServerErrors.Status != StatusNoMaterialChange {
+		t.Fatalf("throughput %s errors %s", r.Throughput.Status, r.ServerErrors.Status)
+	}
+	if r.Outcome != OutcomeNoMaterialChange || v.Outcome != OutcomeNoMaterialChange {
+		t.Fatalf("route %s overall %s", r.Outcome, v.Outcome)
+	}
+	if !strings.Contains(v.Summary, "that could be judged") || !strings.Contains(v.Summary, "do not establish no material change") {
+		t.Fatalf("summary %s", v.Summary)
+	}
+	if !strings.Contains(r.Summary, "other judged signals") {
+		t.Fatalf("route summary %s", r.Summary)
+	}
+	for _, ranked := range v.Ranked {
+		if ranked.Signal == SignalLatency {
+			t.Fatalf("inconclusive latency was ranked: %+v", ranked)
+		}
 	}
 
 	other := rt("GET", "/work").latency(0.004, 0.002, 0.005).boundsOf(0.002, 0.02, 0.2)
@@ -507,6 +538,185 @@ func TestHistogramOverlapAndIncompatibleBuckets(t *testing.T) {
 	if bad.Outcome == OutcomeImprovement {
 		t.Fatal("incompatible histograms were judged as an improvement")
 	}
+}
+
+func TestInconclusiveAloneIsInsufficientEvidence(t *testing.T) {
+	// 40 requests per 1s window is 80 completed requests, below the floor of 100,
+	// so throughput and the 5xx ratio cannot be judged. The p95 estimates move
+	// from 0.020s to 0.008s (−60%), past the 50% threshold, but the buckets
+	// [0.010, 0.050] and [0.005, 0.020] overlap.
+	low := rt("GET", "/work").requests(40, 0, 0)
+	before := build(pair(2, low.latency(0.020, 0.010, 0.050))...)
+	after := build(pair(2, low.latency(0.008, 0.005, 0.020))...)
+	v := mustCompare(t, before, after)
+	r := route(v, "GET", "/work")
+	if r.Throughput.Status != StatusInsufficient || r.ServerErrors.Status != StatusInsufficient {
+		t.Fatalf("throughput %s errors %s", r.Throughput.Status, r.ServerErrors.Status)
+	}
+	if r.Latency.Status != StatusInconclusive || r.Latency.Relative == nil {
+		t.Fatalf("latency %+v", r.Latency)
+	}
+	near(t, *r.Latency.Relative, -0.6)
+	near(t, mustValue(t, r.Latency.Before), 0.020)
+	near(t, mustValue(t, r.Latency.After), 0.008)
+	if r.Outcome != OutcomeInsufficient || v.Outcome != OutcomeInsufficient {
+		t.Fatalf("route %s overall %s", r.Outcome, v.Outcome)
+	}
+	if strings.Contains(v.Summary, "did not cross a material-change threshold") {
+		t.Fatalf("inconclusive comparison was described as no material change: %s", v.Summary)
+	}
+	for _, want := range []string{"not treated as no material change", "bucket ranges overlap", "do not establish no material change"} {
+		if !strings.Contains(v.Summary, want) {
+			t.Errorf("summary lacks %q: %s", want, v.Summary)
+		}
+	}
+	if !strings.Contains(r.Summary, "insufficient evidence") || !strings.Contains(r.Summary, "inconclusive p95") {
+		t.Fatalf("route summary %s", r.Summary)
+	}
+	if len(v.Ranked) != 0 {
+		t.Fatalf("ranked %+v", v.Ranked)
+	}
+}
+
+func TestInconclusiveKeepsJudgedSignals(t *testing.T) {
+	overlapBefore := rt("GET", "/work").latency(0.020, 0.010, 0.050)
+	overlapAfter := func(ok, e5 float64) spec {
+		return rt("GET", "/work").requests(ok, e5, 0).latency(0.008, 0.005, 0.020)
+	}
+	improvement := mustCompare(t, build(pair(2, overlapBefore)...), build(pair(2, overlapAfter(1400, 0))...))
+	imp := route(improvement, "GET", "/work")
+	if imp.Throughput.Status != StatusImprovement || imp.Latency.Status != StatusInconclusive {
+		t.Fatalf("throughput %s latency %s", imp.Throughput.Status, imp.Latency.Status)
+	}
+	near(t, *imp.Throughput.Relative, 0.4)
+	near(t, *imp.Latency.Relative, -0.6)
+	if imp.Outcome != OutcomeImprovement || improvement.Outcome != OutcomeImprovement {
+		t.Fatalf("route %s overall %s", imp.Outcome, improvement.Outcome)
+	}
+	if !strings.Contains(improvement.Summary, "bucket ranges overlap") || !strings.Contains(imp.Summary, "other judged signals") {
+		t.Fatalf("summary %s\nroute %s", improvement.Summary, imp.Summary)
+	}
+	if len(improvement.Ranked) != 1 || improvement.Ranked[0].Signal != SignalThroughput || improvement.Ranked[0].Direction != StatusImprovement {
+		t.Fatalf("ranked %+v", improvement.Ranked)
+	}
+
+	regression := mustCompare(t, build(pair(2, overlapBefore)...), build(pair(2, overlapAfter(650, 0))...))
+	reg := route(regression, "GET", "/work")
+	if reg.Throughput.Status != StatusRegression || reg.Latency.Status != StatusInconclusive {
+		t.Fatalf("throughput %s latency %s", reg.Throughput.Status, reg.Latency.Status)
+	}
+	near(t, *reg.Throughput.Relative, -0.35)
+	if reg.Outcome != OutcomeRegression || regression.Outcome != OutcomeRegression {
+		t.Fatalf("route %s overall %s", reg.Outcome, regression.Outcome)
+	}
+	if len(regression.Ranked) != 1 || regression.Ranked[0].Signal != SignalThroughput || regression.Ranked[0].Direction != StatusRegression {
+		t.Fatalf("ranked %+v", regression.Ranked)
+	}
+}
+
+func TestUndefinedErrorRatioIsNotZero(t *testing.T) {
+	both := mustCompare(t, build(pair(2, rt("GET", "/work").requests(0, 0, 0))...), build(pair(2, rt("GET", "/work").requests(0, 0, 0))...))
+	none := route(both, "GET", "/work").ServerErrors
+	if none.Status != StatusInsufficient || none.Relative != nil {
+		t.Fatalf("status %s relative %v", none.Status, none.Relative)
+	}
+	assertUndefinedRatio(t, none.Before, 0, 0)
+	assertUndefinedRatio(t, none.After, 0, 0)
+	if len(none.Evidence) != 4 || none.Before.Windows != 2 || none.After.Windows != 2 {
+		t.Fatalf("evidence %+v before %+v after %+v", none.Evidence, none.Before, none.After)
+	}
+	bothText := summaryOf(t, both)
+	line := errorLine(t, bothText)
+	if strings.Contains(line, "0.00%") || !strings.Contains(line, "undefined (0 requests, 0 5xx) → undefined (0 requests, 0 5xx)") {
+		t.Fatalf("error line %s", line)
+	}
+	if both.Outcome != OutcomeNoMaterialChange {
+		t.Fatalf("judged zero throughput should remain no_material_change, got %s", both.Outcome)
+	}
+
+	one := mustCompare(t, build(pair(2, rt("GET", "/work"))...), build(pair(2, rt("GET", "/work").requests(0, 0, 0))...))
+	side := route(one, "GET", "/work").ServerErrors
+	if side.Status != StatusInsufficient {
+		t.Fatalf("status %s (%s)", side.Status, side.Reason)
+	}
+	assertDefinedRatio(t, side.Before, 0, 2000)
+	assertUndefinedRatio(t, side.After, 0, 0)
+	oneLine := errorLine(t, summaryOf(t, one))
+	if !strings.Contains(oneLine, "0.00% → undefined (0 requests, 0 5xx)") {
+		t.Fatalf("error line %s", oneLine)
+	}
+
+	realZero := mustCompare(t, build(pair(2, rt("GET", "/work"))...), build(pair(2, rt("GET", "/work"))...))
+	zero := route(realZero, "GET", "/work").ServerErrors
+	if zero.Status != StatusNoMaterialChange {
+		t.Fatalf("status %s (%s)", zero.Status, zero.Reason)
+	}
+	assertDefinedRatio(t, zero.Before, 0, 2000)
+	assertDefinedRatio(t, zero.After, 0, 2000)
+	zeroLine := errorLine(t, summaryOf(t, realZero))
+	if !strings.Contains(zeroLine, "0.00% → 0.00%") || strings.Contains(zeroLine, "undefined") {
+		t.Fatalf("error line %s", zeroLine)
+	}
+}
+
+func assertUndefinedRatio(t *testing.T, m *Measure, errors, requests float64) {
+	t.Helper()
+	if m == nil || m.Value != nil || m.ValueUnavailable != ratioUndefined {
+		t.Fatalf("undefined ratio %+v", m)
+	}
+	if rawValue(t, m) != "null" {
+		t.Fatalf("JSON value %s", rawValue(t, m))
+	}
+	if m.Requests != requests || m.ServerErrors == nil || *m.ServerErrors != errors || m.ElapsedSeconds != 2 || m.Windows != 2 {
+		t.Fatalf("counts not preserved: %+v", m)
+	}
+}
+
+func assertDefinedRatio(t *testing.T, m *Measure, ratio, requests float64) {
+	t.Helper()
+	if m == nil || m.Value == nil || m.ValueUnavailable != "" {
+		t.Fatalf("defined ratio %+v", m)
+	}
+	near(t, *m.Value, ratio)
+	if rawValue(t, m) != "0" && ratio == 0 {
+		t.Fatalf("JSON value %s", rawValue(t, m))
+	}
+	if m.Requests != requests {
+		t.Fatalf("requests %v", m.Requests)
+	}
+}
+
+func rawValue(t *testing.T, m *Measure) string {
+	t.Helper()
+	blob, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &doc); err != nil {
+		t.Fatal(err)
+	}
+	return string(doc["value"])
+}
+
+func summaryOf(t *testing.T, v Validation) string {
+	t.Helper()
+	var b strings.Builder
+	if err := WriteSummary(&b, v); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+func errorLine(t *testing.T, text string) string {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "server_error_ratio:") {
+			return line
+		}
+	}
+	t.Fatalf("no server_error_ratio line:\n%s", text)
+	return ""
 }
 
 func TestNotComparableConfigurations(t *testing.T) {
@@ -695,7 +905,7 @@ func TestErrorRatioUsesOnlyEligibleWindows(t *testing.T) {
 		w(base),
 	)
 	r := route(mustCompare(t, before, build(pair(2, base)...)), "GET", "/work")
-	if r.ServerErrors.Status != StatusNoMaterialChange || r.ServerErrors.Before.Value != 0 {
+	if r.ServerErrors.Status != StatusNoMaterialChange || mustValue(t, r.ServerErrors.Before) != 0 {
 		t.Fatalf("gap 5xx affected the ratio: %+v", r.ServerErrors)
 	}
 	if r.ServerErrors.Before.ServerErrors == nil || *r.ServerErrors.Before.ServerErrors != 0 {

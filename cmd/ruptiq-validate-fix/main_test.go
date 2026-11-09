@@ -103,6 +103,7 @@ func TestGoldenAnalysesAreStable(t *testing.T) {
 		"POST /reservations  insufficient_evidence",
 		"Client-side k6 measurements",
 		"not a statistical significance test",
+		"0.00% → 0.00%",
 		"Validation written to " + out,
 	} {
 		if !strings.Contains(o.stdout, want) {
@@ -138,11 +139,15 @@ func TestGoldenAnalysesAreStable(t *testing.T) {
 	if get.Throughput.Before.Requests != wantRequests || math.Abs(get.Throughput.Before.ElapsedSeconds-wantElapsed) > 1e-9 {
 		t.Fatalf("pooled %+v", get.Throughput.Before)
 	}
-	gotRate := get.Throughput.Before.Value
+	if get.Throughput.Before.Value == nil {
+		t.Fatal("throughput value missing")
+	}
+	gotRate := *get.Throughput.Before.Value
 	if math.Abs(gotRate-wantRequests/wantElapsed) > 1e-6 || gotRate == (2976.190476190476+2026.8456375838925)/2 {
 		t.Fatalf("rate %v is not total requests over total time", gotRate)
 	}
-	if get.ServerErrors.Before.Value != 0 || get.ServerErrors.Before.ClientErrors == nil || *get.ServerErrors.Before.ClientErrors != 20 {
+	if get.ServerErrors.Before.Value == nil || *get.ServerErrors.Before.Value != 0 || get.ServerErrors.Before.Requests != wantRequests ||
+		get.ServerErrors.Before.ClientErrors == nil || *get.ServerErrors.Before.ClientErrors != 20 || get.ServerErrors.Before.ValueUnavailable != "" {
 		t.Fatalf("5xx/4xx %+v", get.ServerErrors.Before)
 	}
 	if get.Throughput.Before.Requests == float64(v.Before.Client.HTTPRequests) {

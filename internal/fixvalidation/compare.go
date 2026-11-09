@@ -262,13 +262,20 @@ func compareRoute(before, after prepared, k routeKey, cfg Config) RouteCompariso
 		rc.Limitations = append(rc.Limitations, "At least one signal for this route could not be judged. The other signals are still compared.")
 	}
 	if lat.Status == StatusInconclusive {
-		rc.Limitations = append(rc.Limitations, "The p95 bucket ranges overlap, so the latency direction is not claimed.")
+		rc.Limitations = append(rc.Limitations, "The p95 bucket ranges overlap, so the latency direction is not claimed. An inconclusive latency comparison does not establish no material change.")
 	}
 	return rc
 }
 
 func routeSummary(rc RouteComparison) string {
-	return fmt.Sprintf("%s %s: %s.", rc.Method, rc.Route, strings.ReplaceAll(rc.Outcome, "_", " "))
+	text := fmt.Sprintf("%s %s: %s.", rc.Method, rc.Route, strings.ReplaceAll(rc.Outcome, "_", " "))
+	if rc.Latency == nil || rc.Latency.Status != StatusInconclusive {
+		return text
+	}
+	if rc.Outcome == OutcomeInsufficient {
+		return text + " The only threshold crossing is an inconclusive p95, so this route has insufficient evidence."
+	}
+	return text + " Latency stayed inconclusive because the bucket ranges overlap; the other judged signals still decide this route."
 }
 
 type reqPoint struct {
@@ -693,29 +700,35 @@ func latencyStatistic(n int) string {
 
 func rateMeasure(p reqPool, n int, stat string) *Measure {
 	return &Measure{
-		Value: p.rate, Unit: UnitRequestsPerSecond, Statistic: stat,
+		Value: fptr(p.rate), Unit: UnitRequestsPerSecond, Statistic: stat,
 		Requests: p.requests, ElapsedSeconds: p.elapsed, Windows: n,
 		ClientErrors: fptr(p.client),
 	}
 }
 
+// ratioUndefined is the machine-readable reason stored when a 5xx ratio has
+// no denominator. The ratio is omitted; it is not stored as 0.
+const ratioUndefined = "5xx ratio is undefined because no requests were completed"
+
 func ratioMeasure(p reqPool, n int, stat string) *Measure {
-	value := 0.0
-	if p.requests > 0 {
-		value = p.ratio
-	}
-	return &Measure{
-		Value: value, Unit: UnitRatio, Statistic: stat,
+	m := &Measure{
+		Unit: UnitRatio, Statistic: stat,
 		Requests: p.requests, ServerErrors: fptr(p.errors), ClientErrors: fptr(p.client),
 		ElapsedSeconds: p.elapsed, Windows: n,
 	}
+	if p.requests > 0 {
+		m.Value = fptr(p.ratio)
+		return m
+	}
+	m.ValueUnavailable = ratioUndefined
+	return m
 }
 
 func latMeasure(p latPool, stat string) *Measure {
 	obs := p.obs
 	lo, hi := p.lo, p.hi
 	return &Measure{
-		Value: p.value, Unit: UnitSeconds, Statistic: stat,
+		Value: fptr(p.value), Unit: UnitSeconds, Statistic: stat,
 		Requests: p.obs, ElapsedSeconds: 0, Observations: &obs, Windows: p.windows,
 		Estimate: true, BucketLowerSeconds: &lo, BucketUpperSeconds: &hi,
 	}
@@ -796,7 +809,7 @@ func rollup(statuses ...string) string {
 		case StatusRegression:
 			reg++
 			judged++
-		case StatusNoMaterialChange, StatusInconclusive:
+		case StatusNoMaterialChange:
 			judged++
 		}
 	}
@@ -849,12 +862,18 @@ func summaryText(outcome string, v Validation, missing, inconclusive int) string
 		OutcomeNoMaterialChange: "The compared server-side signals did not cross a material-change threshold.",
 		OutcomeInsufficient:     "No server-side signal could be judged.",
 	}[outcome]
+	if inconclusive > 0 && outcome == OutcomeNoMaterialChange {
+		base = "The server-side signals that could be judged did not cross a material-change threshold."
+	}
+	if inconclusive > 0 && outcome == OutcomeInsufficient {
+		base = "No server-side signal could be judged. An inconclusive latency comparison is not treated as no material change."
+	}
 	extra := fmt.Sprintf(" %d route(s) compared, %d ranked material change(s).", len(v.Routes), len(v.Ranked))
 	if missing > 0 {
 		extra += fmt.Sprintf(" %d route(s) are missing from one experiment and were not treated as zero traffic.", missing)
 	}
 	if inconclusive > 0 {
-		extra += fmt.Sprintf(" %d latency comparison(s) reached the threshold but the bucket ranges overlap, so their direction is not claimed.", inconclusive)
+		extra += fmt.Sprintf(" %d latency comparison(s) reached the threshold but the bucket ranges overlap, so their direction is not claimed and they do not establish no material change.", inconclusive)
 	}
 	if len(v.Comparability.Warnings) > 0 {
 		extra += " Comparability warnings: " + strings.Join(v.Comparability.Warnings, "; ") + "."

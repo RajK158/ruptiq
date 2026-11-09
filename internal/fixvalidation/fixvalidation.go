@@ -258,10 +258,14 @@ type SignalComparison struct {
 	Reason           string           `json:"reason"`
 }
 
-// Measure is one side of a signal. For latency, Value is the median of
-// per-window p95 estimates, not an experiment-wide p95.
+// Measure is one side of a signal. Value is nil only for a 5xx ratio whose
+// side completed no requests: that ratio is undefined, and ValueUnavailable
+// says why. A ratio of 0 with a positive request count is a real zero and is
+// stored as 0. For latency, Value is the median of per-window p95 estimates,
+// not an experiment-wide p95.
 type Measure struct {
-	Value              float64  `json:"value"`
+	Value              *float64 `json:"value"`
+	ValueUnavailable   string   `json:"value_unavailable,omitempty"`
 	Unit               string   `json:"unit"`
 	Statistic          string   `json:"statistic"`
 	Requests           float64  `json:"requests"`

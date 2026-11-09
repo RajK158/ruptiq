@@ -1266,10 +1266,13 @@ changes exclude the window. The default is at least two eligible windows on each
   time those windows actually covered. Per-window rates are not averaged, and cumulative counters
   are not averaged.
 - **5xx ratio** pools server errors and completed requests. The change is reported in percentage
-  points. 4xx responses stay in their own count.
+  points. 4xx responses stay in their own count. When a side completed no requests, that side's
+  ratio is left null and the summary says it is undefined. A printed 0% is a side that completed
+  requests and had no 5xx responses.
 - **Latency** is the median of the per-window p95 estimates. That is not the p95 of the whole
   experiment. Each estimate keeps its histogram bucket bounds. If the before and after bucket
-  ranges overlap, the command does not call the change an improvement or a regression.
+  ranges overlap, the comparison stays inconclusive. It does not become an improvement, a
+  regression, or `no_material_change` on its own.
 
 ### Outcomes
 
@@ -1278,8 +1281,8 @@ changes exclude the window. The default is at least two eligible windows on each
 | `improvement_observed` | Every material change is an improvement. This is still one observation. |
 | `regression_observed` | At least one material change is a regression, and none is an improvement. |
 | `mixed` | At least one material improvement and one material regression. |
-| `no_material_change` | Signals were compared and none crossed a threshold. |
-| `insufficient_evidence` | Nothing could be judged (too few windows, too few requests, or a missing route and no other signal). |
+| `no_material_change` | At least one signal was judged, and every judged signal stayed inside its threshold. An inconclusive p95 does not supply that judgment. |
+| `insufficient_evidence` | No signal could be judged. That includes too few windows, too few requests, a missing route, and a comparison whose only threshold crossing is an inconclusive p95. |
 | `not_comparable` | VUs, duration, interval, the comparable part of the target URL, or metric configuration differ. No route is treated as equivalent. |
 
 The default thresholds are the same kind of fixed rules used by `ruptiq-investigate`: throughput
@@ -1330,7 +1333,9 @@ either input. URLs lose their user information and query string. The input size 
 - Short runs often end as `insufficient_evidence` because two eligible windows per file is the
   default floor, and each judged throughput baseline needs at least 100 requests.
 - A p95 that moves inside overlapping buckets is inconclusive even when the estimates differ by
-  more than 50%.
+  more than 50%. That signal does not become an improvement, a regression, or `no_material_change`.
+  If nothing else could be judged, the route and the overall outcome are `insufficient_evidence`.
+  A judged throughput or 5xx result is kept, and the summary says the latency direction was not claimed.
 - Different histogram bucket boundaries are reported as incompatible and are not turned into a
   latency verdict.
 
