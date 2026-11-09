@@ -13,7 +13,9 @@
 > "Investigator: evidence-driven findings"). It reports observations and hypotheses, not root
 > causes. A loopback-only regression lab (`demo/regression-lab/`) is a validation fixture that
 > changes CPU work mid-run so the existing pipeline can be checked against a known switch; it is
-> not a checkout service and not a root-cause engine. `RunStore` does not exist in code yet. This
+> not a checkout service and not a root-cause engine. `ruptiq-validate-fix` compares one saved
+> baseline analysis with one saved candidate analysis and reports observed server-side
+> differences; that is not proof of a cause or of a repeatable fix. `RunStore` does not exist in code yet. This
 > document records the intended direction so early code does not paint us into a corner.
 
 ## Core idea: Ruptiq Core is separate from the target
@@ -904,13 +906,60 @@ an unwritable output, and redaction. No test needs k6, Docker, or a running serv
 
 ### Limitations
 
-Only earlier and later windows of one experiment are compared, so short experiments abstain and a
-regression between versions cannot be shown. Only degradation is looked for. The thresholds are
+Only earlier and later windows of one experiment are compared, so short experiments abstain and
+this command cannot show a change between two versions. Only degradation is looked for. The thresholds are
 conservative rules of thumb, not calibrated to any service, and a gradual change that never
 separates the halves is reported as inconclusive. There are no resource, dependency, or network
 measurements, so causes are never identified, and client-side measurements are not used. The
 engine has only been run on synthetic data in unit tests. One live run against
-`demo/regression-lab/` (see below) used the same commands and default thresholds.
+`demo/regression-lab/` (see below) used the same commands and default thresholds. Comparing a
+baseline experiment with a later candidate is a separate step, `ruptiq-validate-fix` (see below),
+and that step still does not identify a cause.
+
+## Fix validation: before and after
+
+`internal/fixvalidation` compares two saved analyses. The command is `ruptiq-validate-fix`. It is
+offline and deterministic. It does not import the investigator's ranking rules and does not change
+them. The command reuses `investigation.ReadAnalysis` so a file is accepted only when it is a
+strict `ruptiq-analyze` report.
+
+For each method and route present in either file it compares three server-side signals, using
+only windows whose samples are both `during_workload` and which have no missed scrapes:
+
+- Throughput is total completed requests divided by total elapsed time. A window of three seconds
+  counts three times a window of one second. The mean of the per-window rates is not used.
+- The 5xx ratio pools `server_errors_5xx` and completed requests. 4xx counts are reported beside
+  it and do not enter the ratio.
+- Latency is the median of the eligible windows' p95 estimates. An even count uses the mean of
+  the two central estimates. The value is labeled as that median, not as the experiment-wide p95.
+  The union of the windows' bucket bounds is kept. Overlapping ranges, or histogram boundaries
+  that differ between the files, do not become an improvement or a regression.
+
+A route that is absent from one file stays absent. It is not filled with zeros. Fewer than two
+eligible windows on a side, or fewer completed requests than the configured floor, is
+`insufficient_evidence` for that signal. Other signals of the same route are still judged.
+
+The experiments are `not_comparable` when VUs, configured duration, sampling interval, the
+scheme, host, and path of the target URL, metric family names, label names, or the analysis
+minimum observation count differ. User information and query strings are already redacted in a
+saved analysis, so they are not compared. When either URL still has those parts, including the
+redacted placeholder, the result warns that a URL match does not prove the original targets were
+the same. Status,
+telemetry completeness, and the metrics URL may differ; those are warnings, not a silent
+mismatch. k6's client counters are copied onto each side and are not inputs.
+
+Outcomes are `improvement_observed`, `regression_observed`, `mixed`, `no_material_change`,
+`insufficient_evidence`, and `not_comparable`. Thresholds default to ±30% throughput, ±1
+percentage point of 5xx ratio (and a factor of two when the better side is not zero, with at
+least five 5xx responses on the worse side), and ±50% on the median window p95. Every material
+row points at `/analysis/windows/{i}/routes/{j}/requests` or `.../latency/p95` in the file it
+came from. The report asks for the pair to be repeated. One pair is an observation only.
+
+The synthetic inventory analysis compared with itself yields `no_material_change`: GET
+`/inventory/{sku}` pools to 6020 requests over 2.498s (2410.7 requests/s) in windows 2 and 3,
+while POST `/reservations` has too few requests to judge. A unit fixture with 1000 requests/s
+and a 20 ms median window p95, then 1400 requests/s and a 4 ms median in a non-overlapping
+bucket, yields `improvement_observed` (+40% throughput, −80% median p95).
 
 ## Regression lab: a known mid-run change
 
@@ -1543,6 +1592,9 @@ checkout works across the three containers.
   between earlier and later windows of one experiment, with evidence references, contradictions,
   limitations, and validation experiments, or an explicit abstention. Run on synthetic analyses
   and on one live controlled change from the regression lab.
+- `cmd/ruptiq-validate-fix`, `internal/fixvalidation`: offline before/after comparison of two
+  saved analyses. Server throughput, 5xx ratio, and the median of per-window p95 estimates, with
+  evidence pointers. An observed improvement is not a proven or repeatable fix.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
   timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
@@ -1558,7 +1610,7 @@ checkout works across the three containers.
 - `compose.yaml` and `demo/checkout/Dockerfile`: a Docker Compose environment for the three
   checkout services, run and smoke-tested by CI.
 
-Root-cause diagnosis, `RunStore` (run history), comparison of experiments, load ramps, cancellation and compensation across services, persistence,
+Root-cause diagnosis, `RunStore` (run history), load ramps, cancellation and compensation across services, persistence,
 target adapters, metrics for the Order and Payment Services, a Prometheus server, dashboards, and
 tracing are not implemented.
 
