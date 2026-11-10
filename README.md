@@ -71,8 +71,9 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
 | Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, run offline on the synthetic experiment, and run on a live controlled change from `demo/regression-lab/` (see below) |
-| One-command diagnosis (`ruptiq-diagnose`) | Done as orchestration of the existing experiment, analysis, and investigation. Unit tested with fake runners and readers, and run once against `demo/regression-lab` (see below). A completed run is not a performance finding. Abstention is not a failure. Before/after comparison stays `ruptiq-validate-fix` |
+| One-command diagnosis (`ruptiq-diagnose`) | Done as orchestration of the existing experiment, analysis, and investigation. Unit tested with fake runners and readers, and run once against `demo/regression-lab` (see below). A completed run is not a performance finding. Abstention is not a failure. Comparing two saved runs is a separate command |
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
+| Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -1221,7 +1222,8 @@ routes, and evidence for the wrong metric. Up to 10 problems are listed.
 `ruptiq-diagnose` runs one experiment, analyses that report, and investigates the analysis, in
 process. It calls `experiment.Coordinator.Run`, `analysis.Analyze`, and `investigation.Investigate`.
 It does not reimplement their calculations, and it does not compare two experiments.
-`ruptiq-validate-fix` remains the command for a before run and an after run.
+`ruptiq-validate-runs` compares two directories this command already wrote.
+`ruptiq-validate-fix` remains the command that compares two analysis files directly.
 
 A completed command means the stages that could run finished and their files were saved. That is
 not a performance finding. If the investigator abstains (`insufficient_evidence`), the command
@@ -1364,8 +1366,8 @@ before another workload, and the four files were byte-for-byte unchanged.
 ### Limitations
 
 - This is one run. It cannot show that a change repeats, and it cannot show that a code change
-  caused anything. Use `ruptiq-validate-fix` on two saved analyses for a before/after comparison;
-  that command is still not proof of a fix.
+  caused anything. Compare two saved diagnosis directories with `ruptiq-validate-runs`, or two
+  analysis files with `ruptiq-validate-fix`. Neither command is proof of a fix.
 - The investigator's rules are unchanged: degradation between earlier and later windows, fixed
   thresholds, no significance test, and no root cause. Short runs abstain.
 - An incomplete experiment (workload passed, telemetry partial) is analysed, because
@@ -1373,7 +1375,89 @@ before another workload, and the four files were byte-for-byte unchanged.
 - Reports are not overwritten. Pick a new directory for another run.
 - The regression-lab run above is one controlled CPU change on one machine. It does not show that
   the same numbers would recur, and it is not a comparison between two software versions.
-  `ruptiq-validate-fix` is still the before/after command. Unit tests do not start k6.
+  `ruptiq-validate-fix` is still the command for two analysis files. `ruptiq-validate-runs` is the
+  command for two diagnosis directories. Unit tests do not start k6.
+
+## Compare two saved diagnosis runs (`ruptiq-validate-runs`)
+
+`ruptiq-validate-runs` reads two directories written by `ruptiq-diagnose` and compares their
+analyses with the existing fix-validation engine. It does not start k6, contact a service,
+restart a server, or modify a deployment. The person running the commands decides when a code
+or deployment change happens, and runs `ruptiq-diagnose` once for the earlier build and once
+for the later build.
+
+Capture the two runs into different directories. A diagnosis refuses a directory that already
+holds its reports, so the before and after runs need their own directories:
+
+```sh
+go run ./cmd/ruptiq-diagnose -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 PATH_TO_K6 -out-dir tmp/diagnosis-before
+```
+
+```sh
+go run ./cmd/ruptiq-diagnose -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 PATH_TO_K6 -out-dir tmp/diagnosis-after
+```
+
+Then compare those saved directories. This does not repeat either experiment:
+
+```sh
+go run ./cmd/ruptiq-validate-runs -before-dir tmp/diagnosis-before -after-dir tmp/diagnosis-after -out-dir tmp/validation-pair
+```
+
+Each input directory must contain `manifest.json`, `experiment.json`, and `analysis.json` from
+one diagnosis. The analysis stage must have succeeded. An investigation that abstains
+(`insufficient_evidence`) is still a valid input. A directory that still holds
+`.ruptiq-diagnose-reservation` is refused, and that file is not deleted. The two input
+directories must be different physical directories. A symlink, junction, or other alias is
+resolved before that check, and the output directory cannot be either input or a directory
+inside either input. If both `analysis.json` files have the same SHA-256, the manifest and
+the summary say they are one saved analysis used twice. The comparison outcome is still
+reported, and it is not independent evidence of a change.
+
+The output directory receives:
+
+| File | What it is |
+| --- | --- |
+| `validation.json` | The existing `fixvalidation.Report`. Its outcome is the comparison. |
+| `manifest.json` | A versioned run-validation manifest: the before and after labels, the SHA-256 of each `analysis.json`, whether the inputs were comparable, the outcome, artifact names, warnings, and limitations. |
+
+The labels stored in those files are `before` and `after`, not absolute paths. Evidence pointers
+inside `validation.json` are JSON pointers into the original analysis, such as
+`/analysis/windows/1/routes/0/requests`. A pointer whose `side` is `before` is resolved in
+`tmp/diagnosis-before/analysis.json`. A pointer whose `side` is `after` is resolved in
+`tmp/diagnosis-after/analysis.json`. They are not pointers into `validation.json`, and they are
+not k6 client metrics.
+
+Exit status 0 means the comparison was produced. That includes `not_comparable` and
+`insufficient_evidence`: those are judgments, not command failures. Exit status 2 is an invalid
+invocation or an output directory that already contains a result or is reserved. Exit status 3
+is a diagnosis that could not be read, or a result that could not be written. `go run` still
+prints `exit status N` and returns 1 to the shell when N is not 0.
+
+### What the outcome means
+
+The outcome words are the existing fix-validation outcomes, unchanged:
+
+| Outcome | Meaning |
+| --- | --- |
+| `improvement_observed` | Every material server-side change improved. |
+| `regression_observed` | A material server-side regression was observed. |
+| `mixed` | Some signals improved and some regressed. |
+| `no_material_change` | The judged signals stayed within the thresholds. |
+| `insufficient_evidence` | No server-side signal could be judged. |
+| `not_comparable` | The two experiments were not run as the same test, so no route was treated as equivalent. |
+
+A completed comparison is not a demonstrated improvement. One pair of saved runs does not show
+that a difference would recur, and it does not show that a code change caused it. The command
+does not apply a fix and does not run the two experiments itself.
+
+The compared experiments must use the same VUs, duration, sampling interval, target URL (after
+redaction), and metric configuration. A workload that failed its pass criteria, or telemetry
+that is incomplete, is still compared when the saved analysis is one the existing analyzer
+accepts. That status is recorded as a limitation. Analyses that do not match their saved
+experiment, or manifests that point at the wrong files, are rejected and are not repaired.
+
+Reports stay in the output directory you choose. Keep that directory outside Git, as with the
+other generated reports under `tmp/`.
 
 ## Compare a baseline and a candidate (`ruptiq-validate-fix`)
 
@@ -2750,6 +2834,8 @@ cmd/ruptiq-experiment/                   Ruptiq Core: experiment command (flags,
 cmd/ruptiq-analyze/                      Ruptiq Core: offline analysis command (flags, files, exit codes)
 cmd/ruptiq-investigate/                  Ruptiq Core: offline investigation command (flags, files, exit codes)
 cmd/ruptiq-validate-fix/                 Ruptiq Core: before/after analysis comparison (flags, files, exit codes)
+cmd/ruptiq-validate-runs/                Ruptiq Core: compare two saved diagnosis directories
+cmd/ruptiq-diagnose/                     Ruptiq Core: one-run diagnosis command (flags, exit codes, JSON files)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
   k6/                                      runs workloads with the k6 program; embedded k6 script
@@ -2769,6 +2855,10 @@ internal/fixvalidation/                  Ruptiq Core: compares a baseline analys
                                          analysis; server throughput, 5xx ratio, and median window
                                          p95, with evidence pointers. Not a cause and not a
                                          significance test
+internal/diagnosis/                      Ruptiq Core: one experiment, its analysis, and its
+                                         investigation, with a versioned manifest
+internal/runvalidation/                  Ruptiq Core: checks two diagnosis directories and compares
+                                         their analyses. Does not run a workload or apply a change
 demo/regression-lab/                     Validation fixture (NOT Ruptiq Core, not checkout): loopback
                                          HTTP target with real CPU work and Prometheus metrics
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
