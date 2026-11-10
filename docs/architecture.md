@@ -108,7 +108,8 @@ runs over time and re-run an investigation on old data. The storage technology i
 3. The results are saved through `RunStore`. (Today: one JSON report file per experiment.)
 4. `Investigator` reads the saved run and produces findings. (Today: `ruptiq-analyze` extracts
    signals from a saved experiment report, and `ruptiq-investigate` ranks the changes between its
-   earlier and later windows as observations and hypotheses to test.)
+   earlier and later windows as observations and hypotheses to test. `ruptiq-diagnose` runs those
+   stages, in order, for one experiment. It does not add a detection rule.)
 
 ## WorkloadRunner: k6 adapter
 
@@ -916,6 +917,85 @@ engine has only been run on synthetic data in unit tests. One live run against
 baseline experiment with a later candidate is a separate step, `ruptiq-validate-fix` (see below),
 and that step still does not identify a cause.
 
+## Single-run diagnosis
+
+`internal/diagnosis` and `ruptiq-diagnose` are the one-command path through the three stages
+above. The package calls `experiment.Coordinator.Run`, then `analysis.Analyze` on the saved
+experiment report, then `investigation.Investigate` on the saved analysis. It does not estimate
+quantiles, compare windows, or rank findings itself. `ruptiq-validate-fix` is unchanged and is
+still the only before/after comparison.
+
+```
+flags + runner + reader
+        |
+        v
+experiment.Coordinator.Run --> experiment.json
+        |
+        |  only when the workload completed (passed, failed, incomplete)
+        v
+analysis.DecodeExperiment + analysis.Analyze --> analysis.json
+        |
+        v
+investigation.DecodeAnalysis + investigation.Investigate --> investigation.json
+        |
+        v
+manifest.json (outcome, stage statuses, schema versions, relative names, limitations)
+```
+
+The output directory is created if needed. Ownership is an exclusive
+`.ruptiq-diagnose-reservation` file (`O_EXCL`), taken before the workload starts and removed
+when the run finishes, fails, or is cancelled. A second process fails while that file exists
+and does not delete a reservation because of its age. After the reservation is held, an output
+directory that already contains one of the four report names is refused. Each report is renamed
+into place from a temporary file in that directory. Artifact names
+are fixed (`experiment.json`, `analysis.json`, `investigation.json`, `manifest.json`); a name
+that would leave the directory is rejected. The manifest stores those names, not absolute paths,
+and stores URLs only after `workload.RedactURL`. Stage errors pass through `workload.RedactText`.
+
+`analysis.json` is an `analysis.Report` and `investigation.json` is an `investigation.Report`,
+with `input` set to the previous artifact's file name, so the existing decoders accept them.
+Evidence pointers in the investigation are JSON pointers into `analysis.json`.
+
+Outcome `completed` means each stage that the experiment data allowed wrote its file. An
+investigation outcome of `insufficient_evidence` is still `completed`: the investigator abstained.
+Outcome `failed` means a stage failed or was skipped. Skipped analysis and investigation do not
+get placeholder files. The experiment file is kept whenever the coordinator returned a report,
+including when the run was cancelled or timed out. Those statuses are not analysed, matching
+`analysis.DecodeExperiment`.
+
+The command's exit codes are 0 (completed, including abstention), 2 (usage, invalid
+configuration, or an output collision), and 3 (a stage failed or the workload did not complete).
+`go run` reports a non-zero status as `exit status N` and then exits 1. A path given to `-k6` is
+resolved against the current directory first, because the k6 adapter runs k6 in a temporary
+directory. A bare executable name is left for `PATH`.
+
+One live run used `demo/regression-lab` at `127.0.0.1:8090` with `-degrade-after 10s`,
+`-baseline-iters 157135`, and `-degraded-iters 11233031`, then:
+
+```
+go run ./cmd/ruptiq-diagnose -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds -out-dir tmp/diagnosis-live-11a
+```
+
+The command exited 0. The experiment passed. k6 v2.3.0 recorded 33354 requests, 1667.0701975500676
+requests/s, failure rate 0, and p95 1.9575 ms over 20.0075558 s. Telemetry was complete (22 of 22
+scrapes). `regression_lab_degraded` stayed 0 with 157135 iterations through the sample at offset
+10.011 s and was 1 with 11233031 iterations from the sample at offset 11.012 s. The investigator,
+at its default thresholds, reported `changes_observed`: combined, latency (about 0.938 ms to about
+24.216 ms), and throughput (2992.9/s to 135.9/s) findings for `GET /work`, plus an abstention for
+`GET /healthz`. Windows 1 and 21 were excluded. Pointers `/analysis/windows/1/routes/1/latency/p95`,
+`/analysis/windows/2/routes/1/latency/p95`, and `/analysis/windows/3/routes/1/latency/p95` resolved
+in `analysis.json` to 0.000958008008008008 s, 0.0009505194218608852 s, and 0.0009376345788473716 s.
+A second run with the same output directory exited 2 and did not change the four files. These
+numbers are that one run. They are not a benchmark, a significance result, or a software fix.
+Reports stayed under gitignored `tmp/`.
+
+Tests use a fake `workload.Runner` and `telemetry.Reader`. They do not start k6, Docker, or an
+HTTP server. They cover a completed run through all three stages, an abstention, missing telemetry,
+a workload error, cancellation, timeout, invalid configuration, output collisions, atomic writes,
+a failed later stage that leaves the experiment file valid, secret redaction, the manifest, schema
+decoding through `analysis.DecodeExperiment` and `investigation.DecodeAnalysis`, and resolution of
+the investigation's evidence pointers in the saved analysis.
+
 ## Fix validation: before and after
 
 `internal/fixvalidation` compares two saved analyses. The command is `ruptiq-validate-fix`. It is
@@ -1615,6 +1695,10 @@ checkout works across the three containers.
   between earlier and later windows of one experiment, with evidence references, contradictions,
   limitations, and validation experiments, or an explicit abstention. Run on synthetic analyses
   and on one live controlled change from the regression lab.
+- `cmd/ruptiq-diagnose`, `internal/diagnosis`: one command that runs an experiment, analyses the
+  saved report, and investigates that analysis. Orchestration only. Abstention is a completed
+  investigation. Before/after comparison remains `ruptiq-validate-fix`. Unit tested with fake
+  runners and readers, and run once against the regression lab (see above).
 - `cmd/ruptiq-validate-fix`, `internal/fixvalidation`: offline before/after comparison of two
   saved analyses. Server throughput, 5xx ratio, and the median of per-window p95 estimates, with
   evidence pointers. Run on synthetic analyses and on two live regression-lab pairs. An observed

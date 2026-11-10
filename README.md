@@ -41,9 +41,10 @@ compares two saved `ruptiq-run` results offline; `ruptiq-telemetry`, which reads
 of a target's Prometheus metrics; `ruptiq-experiment`, which runs a k6 load test while
 sampling a Prometheus endpoint and saves both in one report; `ruptiq-analyze`, which
 calculates server-side throughput, 5xx rates, and estimated latency percentiles from a saved
-experiment report, offline; and `ruptiq-investigate`, which ranks evidence-backed findings
-(observations and hypotheses to test, not root causes) from a saved analysis, offline. The
-checkout demo has three
+experiment report, offline; `ruptiq-investigate`, which ranks evidence-backed findings
+(observations and hypotheses to test, not root causes) from a saved analysis, offline; and
+`ruptiq-diagnose`, which runs that experiment, analysis, and investigation as one command.
+The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
 the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics at `GET /metrics`.
@@ -70,6 +71,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
 | Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, run offline on the synthetic experiment, and run on a live controlled change from `demo/regression-lab/` (see below) |
+| One-command diagnosis (`ruptiq-diagnose`) | Done as orchestration of the existing experiment, analysis, and investigation. Unit tested with fake runners and readers, and run once against `demo/regression-lab` (see below). A completed run is not a performance finding. Abstention is not a failure. Before/after comparison stays `ruptiq-validate-fix` |
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
@@ -1213,6 +1215,165 @@ routes, and evidence for the wrong metric. Up to 10 problems are listed.
 - Until the regression lab (below), it had been run only on synthetic data. One live run against
   that lab is recorded there; it is still not a comparison between versions or a root-cause
   diagnosis.
+
+## Diagnose one run (`ruptiq-diagnose`)
+
+`ruptiq-diagnose` runs one experiment, analyses that report, and investigates the analysis, in
+process. It calls `experiment.Coordinator.Run`, `analysis.Analyze`, and `investigation.Investigate`.
+It does not reimplement their calculations, and it does not compare two experiments.
+`ruptiq-validate-fix` remains the command for a before run and an after run.
+
+A completed command means the stages that could run finished and their files were saved. That is
+not a performance finding. If the investigator abstains (`insufficient_evidence`), the command
+still succeeds: abstention is not a failure and not evidence that the service is healthy.
+
+```sh
+go run ./cmd/ruptiq-diagnose -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 PATH_TO_K6 -out-dir tmp/diagnosis-run
+```
+
+The flags are the existing experiment, analysis, and investigation flags (`-url`, `-metrics-url`,
+`-vus`, `-duration`, `-interval`, `-k6`, the sampling and timeout limits, the metric family and
+label names, and the investigator thresholds). `-out-dir` is the only new one. A `-k6` value that
+contains a slash is resolved against the current directory before k6 starts, because k6 runs in a
+temporary directory. A bare name such as `k6` is still found on `PATH`. The directory is
+created when it is missing. If it already contains `experiment.json`, `analysis.json`,
+`investigation.json`, or `manifest.json`, the command stops and leaves those files alone.
+While a diagnosis runs it owns the directory by exclusively creating
+`.ruptiq-diagnose-reservation`. A second process fails before starting a workload if that
+file exists, and the file is removed when the run finishes, fails, or is cancelled. A
+reservation left by a crashed process is not deleted automatically.
+Generated runs belong under `tmp/`, which Git ignores.
+
+Ctrl+C cancels the experiment. The experiment report is kept when the coordinator produced one.
+Analysis and investigation run only when that report is one `ruptiq-analyze` would accept:
+status `passed`, `failed` (the workload finished but missed its pass criteria), or `incomplete`
+(the workload passed and telemetry is partial). Status `error`, `cancelled`, and `timed_out`
+are saved and not analysed. A later stage that fails does not delete the earlier files and does
+not invent the files it did not produce. The manifest's outcome is then `failed`.
+
+```text
+tmp/diagnosis-run/
+  experiment.json       workload result and telemetry samples (the ruptiq-experiment report)
+  analysis.json         per-window server signals (the ruptiq-analyze report)
+  investigation.json    ranked findings or an abstention (the ruptiq-investigate report)
+  manifest.json         stage statuses, schema versions, relative file names, limitations
+```
+
+`experiment.json` is the experiment report itself. `analysis.json` and `investigation.json` use
+the same wrappers as `ruptiq-analyze -out` and `ruptiq-investigate -out`, with `input` set to the
+previous file's name (`experiment.json`, then `analysis.json`) rather than a machine path.
+`manifest.json` lists those names, the three stage results, and the schema version of each
+artifact. URLs in the manifest have no user information and no query string.
+
+Evidence references inside `investigation.json` are JSON pointers into `analysis.json`, such as
+`/analysis/windows/1/routes/0/requests`. The pointer's array indexes start at 0. The window
+numbers printed in the summary start at 1, so window 2 is `/analysis/windows/1`. Open the saved
+analysis and follow the pointer; the value it lands on is the measurement the finding uses.
+
+The console summary states the diagnosis outcome (`completed` or `failed`), then the experiment
+and investigation summaries and the manifest's limitations. `completed` together with
+`insufficient_evidence` means the reports were written and the investigator declined to conclude
+a change.
+
+```json
+{
+  "schema_version": 1,
+  "versions": {
+    "diagnosis_schema": 1,
+    "experiment_schema": 1,
+    "analysis_schema": 1,
+    "investigation_schema": 1
+  },
+  "outcome": "completed",
+  "stages": [
+    {"name": "experiment", "status": "succeeded", "artifact": "experiment.json", "experiment_status": "passed"},
+    {"name": "analysis", "status": "succeeded", "artifact": "analysis.json"},
+    {"name": "investigation", "status": "succeeded", "artifact": "investigation.json", "investigation_outcome": "insufficient_evidence"}
+  ],
+  "artifacts": ["experiment.json", "analysis.json", "investigation.json", "manifest.json"],
+  "limitations": [
+    "Completing this command means the stages that could run finished and their reports were saved. It is not itself a performance finding.",
+    "Findings are observations or hypotheses from one run. They are not root causes, and no statistical significance is claimed.",
+    "An investigation outcome of insufficient_evidence is an abstention: not a command failure, and not evidence that performance is healthy.",
+    "This command diagnoses one run. Comparing a before run with an after run is ruptiq-validate-fix, a separate command."
+  ]
+}
+```
+
+The JSON above shows the shape of a manifest, including an abstention. It is not a measured run.
+Timings, request rates, and latencies stay in the three reports and depend on the target.
+
+Exit status: 0 the diagnosis completed (including an abstention, and including a workload that
+failed its own pass criteria), 2 invalid arguments or an output directory that already holds a
+diagnosis, 3 a stage failed or was skipped because the workload did not complete. Files are
+written by renaming a temporary file in the output directory, so a reader does not see a partial
+JSON file. `go run` prints `exit status N` and returns 1 to the shell when the command exits
+with N other than 0; a built `ruptiq-diagnose` returns N itself.
+
+### One regression-lab run
+
+This is one Windows run, started at `2026-11-10T01:05:32.507Z`. It is not a benchmark and not a
+proof that the later windows were slower because of a code change. The lab was already listening
+on `127.0.0.1:8090`:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 10s -baseline-iters 157135 -degraded-iters 11233031
+```
+
+From the repository root, with the checked k6 v2.3.0 binary:
+
+```sh
+go run ./cmd/ruptiq-diagnose -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds -out-dir tmp/diagnosis-live-11a
+```
+
+The lab's first `GET /work` starts a 10s timer, then each `/work` uses 11,233,031 iterations
+instead of 157,135. Default investigator thresholds were not changed. The command exited 0.
+Reports stayed in gitignored `tmp/diagnosis-live-11a/`.
+
+| | Observed on this run |
+| --- | --- |
+| Experiment | `passed` |
+| k6 | 33,354 requests, 1667.0701975500676/s, 0 failed, failure rate 0, p95 1.9575 ms, measured 20.0075558 s |
+| Telemetry | complete: 22 of 22 scrapes succeeded, 0 failed; 1 sample before, 20 during, 1 after |
+| CPU gauge | samples 1–11, through offset 10.011 s: `regression_lab_degraded` 0 and 157,135 iterations. Samples 12–22, from offset 11.012 s: degraded 1 and 11,233,031 iterations |
+| Investigation | `changes_observed` |
+
+Ranked findings, using the investigator's own summary: a major `combined_degradation` hypothesis
+for `GET /work` (same windows), a major `latency_degradation` from about 0.938 ms to about 24.216 ms
+(+2482.7%), a major `throughput_degradation` from 2992.9 requests/s to 135.9 requests/s (−95.5%),
+and an `insufficient_evidence` abstention for `GET /healthz` (no traffic). Windows 1 and 21 were
+excluded because they span the start or end of the workload. Comparable windows were 2–20.
+k6's client p95 is not the server-side estimate.
+
+These analysis pointers were read back from `analysis.json`:
+
+| Pointer | Value |
+| --- | --- |
+| `/analysis/windows/1/routes/1/latency/p95` | 0.000958008008008008 s, bucket 0.0005–0.001 s (baseline) |
+| `/analysis/windows/2/routes/1/latency/p95` | 0.0009505194218608852 s, bucket 0.0005–0.001 s (baseline) |
+| `/analysis/windows/3/routes/1/latency/p95` | 0.0009376345788473716 s, bucket 0.0005–0.001 s (baseline) |
+| `/analysis/windows/11/routes/1/latency/p95` | 0.024840425531914893 s, bucket 0.01–0.025 s (comparison) |
+| `/analysis/windows/1/routes/1/requests` | 2518 requests (baseline) |
+
+The manifest outcome was `completed`. All three stages were `succeeded`, with artifact names
+`experiment.json`, `analysis.json`, and `investigation.json`. The investigation stage recorded
+`changes_observed`. The manifest lists those file names, not absolute paths. A second invocation
+with the same `-out-dir` stopped with exit status 2 (`output directory already contains ...`)
+before another workload, and the four files were byte-for-byte unchanged.
+
+### Limitations
+
+- This is one run. It cannot show that a change repeats, and it cannot show that a code change
+  caused anything. Use `ruptiq-validate-fix` on two saved analyses for a before/after comparison;
+  that command is still not proof of a fix.
+- The investigator's rules are unchanged: degradation between earlier and later windows, fixed
+  thresholds, no significance test, and no root cause. Short runs abstain.
+- An incomplete experiment (workload passed, telemetry partial) is analysed, because
+  `ruptiq-analyze` accepts it. A cancelled, timed out, or failed-to-start workload is not.
+- Reports are not overwritten. Pick a new directory for another run.
+- The regression-lab run above is one controlled CPU change on one machine. It does not show that
+  the same numbers would recur, and it is not a comparison between two software versions.
+  `ruptiq-validate-fix` is still the before/after command. Unit tests do not start k6.
 
 ## Compare a baseline and a candidate (`ruptiq-validate-fix`)
 
