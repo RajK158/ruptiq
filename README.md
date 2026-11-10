@@ -1517,6 +1517,15 @@ only when the corresponding files are a finished diagnosis or a finished compari
 partial stage is `failed` or `interrupted`, with a recovery note. A completed workflow is not
 the same thing as an observed improvement.
 
+A finished `comparison/` is reused only when `validation.json` is a successful fix-validation
+report, its outcome and comparability match `comparison/manifest.json`, and that manifest's
+analysis SHA-256 values match the current `before/analysis.json` and `after/analysis.json`.
+A corrupt report, an error report, a disagreement, or a comparison copied from another pair is
+not adopted and is not run again. Those files stay in place. Remove `comparison/` by hand and
+run `-stage compare` again to judge the current diagnoses. `pair-manifest.json` is replaced by
+renaming a complete temporary file onto it. The previous manifest is not deleted first. If that
+replacement fails, the previous manifest remains.
+
 The outcome words are the fix-validation outcomes, unchanged: `improvement_observed`,
 `regression_observed`, `mixed`, `no_material_change`, `insufficient_evidence`, and
 `not_comparable`. The last two are completed comparisons, not command failures. Evidence

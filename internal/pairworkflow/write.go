@@ -81,13 +81,21 @@ func reservePairDir(dir string) (func(), error) {
 	return func() { once.Do(func() { os.Remove(path) }) }, nil
 }
 
-// writeJSONFile replaces pair-manifest.json by writing a temporary file in
-// the pair directory and renaming it into place. The replacement is not a
-// transaction with the stage reports: those are written first, by the
-// diagnosis or run-validation packages, and are left in place if this write
-// fails. On Windows a rename does not replace an existing file, so the
-// previous manifest is removed only after the temporary file is complete.
-// A crash in that gap leaves the stage directories as the record.
+// replaceFile moves a complete temporary file onto the destination,
+// replacing an existing file without deleting it first. Tests set it to
+// simulate a failed replacement. A test double must not delete the
+// destination, and production code must not fall back to delete-then-rename.
+var replaceFile = os.Rename
+
+// writeJSONFile replaces pair-manifest.json. The complete temporary file is
+// closed in the pair directory, then renamed onto the destination. The
+// previous manifest is not deleted first. On Windows, os.Rename uses
+// MoveFileEx with MOVEFILE_REPLACE_EXISTING, so the existing file is
+// replaced in that call. If the replacement fails, the previous manifest
+// stays and the temporary file is removed. This is not a transaction with
+// the stage reports: those are written first and are left in place if this
+// write fails. The pair reservation is not released here; the caller holds
+// it until the invocation returns.
 func writeJSONFile(dir, name string, v any) error {
 	if name != FileManifest {
 		return fmt.Errorf("pair workflow writes only %s", FileManifest)
@@ -122,10 +130,7 @@ func writeJSONFile(dir, name string, v any) error {
 	if err := os.Chmod(tmpName, 0o644); err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceFile(tmpName, path); err != nil {
 		return err
 	}
 	committed = true

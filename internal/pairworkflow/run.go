@@ -207,8 +207,9 @@ func (s *session) capture(dirName, stage string) (Result, error) {
 	return Result{Dir: s.root, Manifest: m}, nil
 }
 
-// adoptComparison records a comparison that is already on disk. It does not
-// call runvalidation again and does not replace validation.json.
+// adoptComparison records a comparison that inspect has already bound to the
+// current before and after analyses. It does not call runvalidation again
+// and does not replace validation.json.
 func (s *session) adoptComparison() (Result, error) {
 	m := s.kept()
 	m.State = StateComparisonCompleted

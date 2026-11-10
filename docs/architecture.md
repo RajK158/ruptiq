@@ -1087,15 +1087,25 @@ limits, metric families, labels, and minimum histogram observations, and refuses
 workload when they differ. If the original URL hashes are missing, the after workload is
 refused as well. Two saved diagnoses can still be compared: `compare` calls `runvalidation.Run`
 when `comparison/` is empty. A manifest that is only behind a finished `comparison/` is updated
-from those files and does not run the comparison again. `fixvalidation.Compare` remains the
-authority for whether the two saved runs are comparable and for the six outcomes.
+from those files and does not run the comparison again. That reuse is allowed only when
+`validation.json` is a successful fix-validation report of the supported schema, its outcome
+and comparability match `comparison/manifest.json`, and that manifest identifies
+`before/analysis.json` and `after/analysis.json` with SHA-256 values of the current files.
+A corrupt validation file, an error report, a disagreement, an unsupported schema, or hashes
+from another pair are refused. Those comparison files are left in place and the comparison is
+not recomputed. `fixvalidation.Compare` remains the authority for whether the two saved runs
+are comparable and for the six outcomes.
 
 The states `baseline_captured`, `candidate_captured`, and `comparison_completed` are written
 only when the corresponding diagnosis or comparison files are complete. A failed diagnosis, a
 partial directory, or a cancellation is `failed` or `interrupted`. The pair manifest is updated
-after the stage reports are written. It is not a transaction across those files. On resume the
-stage directories are read again; a manifest that claims a file which is missing or whose
-analysis hash differs is rejected and is not repaired.
+after the stage reports are written. It is not a transaction across those files. Replacing it
+writes a complete temporary file in the pair directory and renames that file onto
+`pair-manifest.json`. The previous manifest is not deleted first, including on Windows. If the
+replacement fails, the previous manifest stays, the temporary file is removed, and the pair
+reservation stays until the invocation returns. On resume the stage directories are read
+again; a manifest that claims a file which is missing or whose analysis hash differs is
+rejected and is not repaired.
 
 The pair directory is owned by an exclusive `.ruptiq-pair-reservation` file, created with
 `O_EXCL` and removed when the invocation returns. A reservation left by a crash is not deleted

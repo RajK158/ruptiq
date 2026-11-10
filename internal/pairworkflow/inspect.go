@@ -63,7 +63,7 @@ func inspect(root string, maxBytes int64) (facts, error) {
 	if err != nil {
 		return facts{}, err
 	}
-	f.comparison, err = classifyComparison(filepath.Join(root, DirComparison), maxBytes)
+	f.comparison, err = classifyComparison(filepath.Join(root, DirComparison), f.before, f.after, maxBytes)
 	if err != nil {
 		return facts{}, err
 	}
@@ -156,7 +156,7 @@ func classifyDiagnosis(dir, label string, maxBytes int64) (diagFact, error) {
 	}, nil
 }
 
-func classifyComparison(dir string, maxBytes int64) (compFact, error) {
+func classifyComparison(dir string, before, after diagFact, maxBytes int64) (compFact, error) {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return compFact{kind: kindAbsent}, nil
@@ -194,10 +194,17 @@ func classifyComparison(dir string, maxBytes int64) (compFact, error) {
 	}
 	var manifest runvalidation.Manifest
 	if err := decodeFile(manPath, maxBytes, &manifest); err != nil {
-		return compFact{kind: kindInconsistent, detail: "comparison manifest.json: " + cleanErr(err)}, nil
+		return inconsistentComparison("comparison manifest.json: " + cleanErr(err)), nil
 	}
-	if manifest.SchemaVersion != runvalidation.SchemaVersion || !knownOutcome(manifest.Outcome) {
-		return compFact{kind: kindInconsistent, detail: "comparison manifest outcome or schema is not a run-validation result"}, nil
+	if !supportedComparisonManifest(manifest) {
+		return inconsistentComparison("comparison manifest outcome or schema is not a supported run-validation result"), nil
+	}
+	var report fixvalidation.Report
+	if err := decodeFile(valPath, maxBytes, &report); err != nil {
+		return inconsistentComparison("comparison/validation.json: " + cleanErr(err)), nil
+	}
+	if detail := comparisonAuthenticity(manifest, report, before, after); detail != "" {
+		return inconsistentComparison(detail), nil
 	}
 	return compFact{
 		kind: kindCompleted,
@@ -210,6 +217,88 @@ func classifyComparison(dir string, maxBytes int64) (compFact, error) {
 			Warnings:             append([]string{}, manifest.Warnings...),
 		},
 	}, nil
+}
+
+// inconsistentComparison refuses to treat the saved comparison as finished.
+// The files are left where they are. Nothing is recomputed from them.
+func inconsistentComparison(detail string) compFact {
+	return compFact{
+		kind:   kindInconsistent,
+		detail: detail + ". The comparison files were kept and were not repaired, and no comparison was run again",
+	}
+}
+
+func supportedComparisonManifest(m runvalidation.Manifest) bool {
+	return m.SchemaVersion == runvalidation.SchemaVersion &&
+		knownOutcome(m.Outcome) &&
+		m.Versions.RunValidation == runvalidation.SchemaVersion &&
+		m.Versions.FixValidation == fixvalidation.SchemaVersion &&
+		m.Versions.Diagnosis == diagnosis.SchemaVersion &&
+		m.Versions.Analysis == analysis.SchemaVersion
+}
+
+// comparisonAuthenticity reports why a decoded comparison cannot be trusted
+// for the diagnoses currently in before/ and after/. An empty string means
+// the saved result belongs to those analyses. This does not call
+// fixvalidation.Compare and does not rewrite either file.
+func comparisonAuthenticity(manifest runvalidation.Manifest, report fixvalidation.Report, before, after diagFact) string {
+	if report.SchemaVersion != fixvalidation.SchemaVersion {
+		return fmt.Sprintf("comparison/validation.json schema_version %d is not supported (%d)", report.SchemaVersion, fixvalidation.SchemaVersion)
+	}
+	if report.Error != "" || report.Validation == nil {
+		return "comparison/validation.json is an error report, not a successful validation result"
+	}
+	if !knownOutcome(report.Validation.Outcome) || report.Validation.Outcome != manifest.Outcome {
+		return "comparison/validation.json outcome " + report.Validation.Outcome + " does not match comparison/manifest.json outcome " + manifest.Outcome
+	}
+	if report.Validation.Comparability.Comparable != manifest.Comparable {
+		return "comparison/validation.json comparability does not match comparison/manifest.json"
+	}
+	if !supportedComparisonArtifacts(manifest.Artifacts) || !identifiesAnalyses(manifest, report) {
+		return "comparison/manifest.json does not identify the current before/analysis.json and after/analysis.json artifacts"
+	}
+	if before.kind != kindCompleted || after.kind != kindCompleted ||
+		manifest.Before.AnalysisSHA256 == "" || manifest.After.AnalysisSHA256 == "" ||
+		manifest.Before.AnalysisSHA256 != before.stage.AnalysisSHA256 ||
+		manifest.After.AnalysisSHA256 != after.stage.AnalysisSHA256 {
+		return "comparison/manifest.json SHA-256 values do not match before/analysis.json and after/analysis.json"
+	}
+	return ""
+}
+
+func supportedComparisonArtifacts(got []runvalidation.Artifact) bool {
+	if len(got) != 2 {
+		return false
+	}
+	var sawValidation, sawManifest bool
+	for _, a := range got {
+		switch a.Name {
+		case runvalidation.FileValidation:
+			if sawValidation || a.Schema != "fixvalidation" || a.SchemaVersion != fixvalidation.SchemaVersion {
+				return false
+			}
+			sawValidation = true
+		case runvalidation.FileManifest:
+			if sawManifest || a.Schema != "runvalidation" || a.SchemaVersion != runvalidation.SchemaVersion {
+				return false
+			}
+			sawManifest = true
+		default:
+			return false
+		}
+	}
+	return sawValidation && sawManifest
+}
+
+func identifiesAnalyses(m runvalidation.Manifest, report fixvalidation.Report) bool {
+	beforeFile := DirBefore + "/" + diagnosis.FileAnalysis
+	afterFile := DirAfter + "/" + diagnosis.FileAnalysis
+	return m.Before.Label == DirBefore &&
+		m.After.Label == DirAfter &&
+		m.Before.AnalysisFile == beforeFile &&
+		m.After.AnalysisFile == afterFile &&
+		report.Before == beforeFile &&
+		report.After == afterFile
 }
 
 func readPairManifest(root string, maxBytes int64) (*Manifest, error) {
@@ -250,11 +339,19 @@ func manifestAgrees(m Manifest, f facts) []string {
 	if m.After != nil {
 		problems = append(problems, stageClaim("after", m.After, f.after)...)
 	}
+	refused := false
+	noteRefused := func() {
+		if refused {
+			return
+		}
+		refused = true
+		problems = append(problems, refusedComparison(f.comparison))
+	}
 	if m.Comparison != nil {
 		if f.comparison.kind != kindCompleted || m.Comparison.Outcome != f.comparison.stage.Outcome ||
 			m.Comparison.BeforeAnalysisSHA256 != f.comparison.stage.BeforeAnalysisSHA256 ||
 			m.Comparison.AfterAnalysisSHA256 != f.comparison.stage.AfterAnalysisSHA256 {
-			problems = append(problems, "pair-manifest.json comparison does not match comparison/")
+			noteRefused()
 		}
 	}
 	switch m.State {
@@ -269,8 +366,10 @@ func manifestAgrees(m Manifest, f facts) []string {
 			problems = append(problems, "pair-manifest.json says candidate_captured but before/ and after/ are not both completed diagnoses")
 		}
 	case StateComparisonCompleted:
-		if f.before.kind != kindCompleted || f.after.kind != kindCompleted || f.comparison.kind != kindCompleted || m.Comparison == nil {
+		if f.before.kind != kindCompleted || f.after.kind != kindCompleted || m.Comparison == nil {
 			problems = append(problems, "pair-manifest.json says comparison_completed but the stage directories do not")
+		} else if f.comparison.kind != kindCompleted {
+			noteRefused()
 		}
 	case StateFailed, StateInterrupted:
 		if m.Failure == nil || (m.Failure.Stage != StageBefore && m.Failure.Stage != StageAfter && m.Failure.Stage != StageCompare) {
@@ -283,6 +382,13 @@ func manifestAgrees(m Manifest, f facts) []string {
 		}
 	}
 	return problems
+}
+
+func refusedComparison(c compFact) string {
+	if c.detail != "" {
+		return c.detail
+	}
+	return "pair-manifest.json comparison does not match comparison/"
 }
 
 func stageClaim(label string, claimed *DiagnosisStage, disk diagFact) []string {

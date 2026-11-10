@@ -18,6 +18,7 @@ import (
 	"github.com/RajK158/ruptiq/internal/experiment"
 	"github.com/RajK158/ruptiq/internal/fixvalidation"
 	"github.com/RajK158/ruptiq/internal/investigation"
+	"github.com/RajK158/ruptiq/internal/runvalidation"
 	"github.com/RajK158/ruptiq/internal/telemetry"
 	"github.com/RajK158/ruptiq/internal/workload"
 )
@@ -665,6 +666,126 @@ func TestCompletedComparisonBehindManifestIsAdopted(t *testing.T) {
 	}
 }
 
+func TestCorruptValidationIsNotAdopted(t *testing.T) {
+	dir := pairReadyToAdopt(t)
+	beforeSnap, afterSnap := diagnosisSnaps(t, dir)
+	writeBytes(t, filepath.Join(dir, DirComparison, runvalidation.FileValidation), []byte("{"))
+	compSnap := snap(t, filepath.Join(dir, DirComparison))
+
+	_, err := Run(context.Background(), Config{Stage: StageCompare, PairDir: dir}, Inputs{})
+	expectRejectedComparison(t, dir, beforeSnap, afterSnap, compSnap, err, "validation.json")
+	if mustText(t, filepath.Join(dir, DirComparison, runvalidation.FileValidation)) != "{" {
+		t.Fatal("corrupt validation.json was repaired")
+	}
+}
+
+func TestValidationOutcomeMismatchIsNotAdopted(t *testing.T) {
+	dir := pairReadyToAdopt(t)
+	beforeSnap, afterSnap := diagnosisSnaps(t, dir)
+	valPath := filepath.Join(dir, DirComparison, runvalidation.FileValidation)
+	rewriteJSON(t, valPath, func(doc map[string]any) {
+		validation, ok := doc["validation"].(map[string]any)
+		if !ok {
+			t.Fatal("validation.json has no validation object")
+		}
+		if validation["outcome"] == fixvalidation.OutcomeRegression {
+			t.Fatal("fixture outcome is already the disagreement value")
+		}
+		validation["outcome"] = fixvalidation.OutcomeRegression
+	})
+	compSnap := snap(t, filepath.Join(dir, DirComparison))
+
+	_, err := Run(context.Background(), Config{Stage: StageCompare, PairDir: dir}, Inputs{})
+	expectRejectedComparison(t, dir, beforeSnap, afterSnap, compSnap, err, "does not match")
+	text := mustText(t, valPath)
+	if !strings.Contains(text, fixvalidation.OutcomeRegression) {
+		t.Fatal("disagreed validation.json was repaired")
+	}
+	manifest := mustText(t, filepath.Join(dir, DirComparison, runvalidation.FileManifest))
+	if strings.Contains(manifest, fixvalidation.OutcomeRegression) || !strings.Contains(manifest, fixvalidation.OutcomeImprovement) {
+		t.Fatal("comparison manifest outcome changed")
+	}
+}
+
+func TestForeignComparisonHashesAreNotAdopted(t *testing.T) {
+	dir := pairReadyToAdopt(t)
+	beforeSnap, afterSnap := diagnosisSnaps(t, dir)
+	foreignBefore := strings.Repeat("ab", 32)
+	foreignAfter := strings.Repeat("cd", 32)
+	manPath := filepath.Join(dir, DirComparison, runvalidation.FileManifest)
+	rewriteJSON(t, manPath, func(doc map[string]any) {
+		before, ok := doc["before"].(map[string]any)
+		after, okAfter := doc["after"].(map[string]any)
+		if !ok || !okAfter {
+			t.Fatal("comparison manifest has no before and after records")
+		}
+		before["analysis_sha256"] = foreignBefore
+		after["analysis_sha256"] = foreignAfter
+	})
+	compSnap := snap(t, filepath.Join(dir, DirComparison))
+
+	_, err := Run(context.Background(), Config{Stage: StageCompare, PairDir: dir}, Inputs{})
+	expectRejectedComparison(t, dir, beforeSnap, afterSnap, compSnap, err, "SHA-256")
+	text := mustText(t, manPath)
+	if !strings.Contains(text, foreignBefore) || !strings.Contains(text, foreignAfter) {
+		t.Fatal("foreign comparison manifest was repaired")
+	}
+}
+
+func TestPairManifestReplaceKeepsPreviousFile(t *testing.T) {
+	dir := t.TempDir()
+	reservation := filepath.Join(dir, reservationFile)
+	if err := os.WriteFile(reservation, []byte("pid 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := Manifest{SchemaVersion: SchemaVersion, State: StateBaselineCaptured, Limitations: []string{"one"}}
+	if err := writeJSONFile(dir, FileManifest, first); err != nil {
+		t.Fatal(err)
+	}
+	if readManifest(t, dir).State != StateBaselineCaptured {
+		t.Fatal(readManifest(t, dir).State)
+	}
+	if temps := pairTempFiles(t, dir); len(temps) != 0 {
+		t.Fatalf("temporary files after create: %v", temps)
+	}
+
+	second := first
+	second.State = StateCandidateCaptured
+	second.Limitations = []string{"two"}
+	if err := writeJSONFile(dir, FileManifest, second); err != nil {
+		t.Fatal(err)
+	}
+	if readManifest(t, dir).State != StateCandidateCaptured {
+		t.Fatal("existing manifest was not replaced")
+	}
+	if temps := pairTempFiles(t, dir); len(temps) != 0 {
+		t.Fatalf("temporary files after replace: %v", temps)
+	}
+	if mustText(t, reservation) != "pid 1\n" {
+		t.Fatal("replacement changed the pair reservation")
+	}
+	previous := mustText(t, filepath.Join(dir, FileManifest))
+
+	original := replaceFile
+	t.Cleanup(func() { replaceFile = original })
+	replaceFile = func(string, string) error { return errors.New("rename failed") }
+	third := second
+	third.State = StateComparisonCompleted
+	err := writeJSONFile(dir, FileManifest, third)
+	if err == nil || !strings.Contains(err.Error(), "rename failed") {
+		t.Fatalf("err %v", err)
+	}
+	if mustText(t, filepath.Join(dir, FileManifest)) != previous {
+		t.Fatal("failed replacement destroyed the previous manifest")
+	}
+	if temps := pairTempFiles(t, dir); len(temps) != 0 {
+		t.Fatalf("temporary files after failed replacement: %v", temps)
+	}
+	if mustText(t, reservation) != "pid 1\n" {
+		t.Fatal("failed replacement released the pair reservation")
+	}
+}
+
 func TestWriteFailurePreservesDiagnosis(t *testing.T) {
 	dir := t.TempDir()
 	_, err := Run(context.Background(), baseConfig(dir, StageBefore), Inputs{
@@ -686,6 +807,81 @@ func TestWriteFailurePreservesDiagnosis(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, reservationFile)); !os.IsNotExist(statErr) {
 		t.Fatal("reservation left behind")
 	}
+}
+
+func pairReadyToAdopt(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeDiagnosis(t, filepath.Join(dir, DirBefore), diagOpt{counts: []float64{0, 0, 1000, 2000, 2000}})
+	writeDiagnosis(t, filepath.Join(dir, DirAfter), diagOpt{counts: []float64{0, 0, 2000, 4000, 4000}, fast: true})
+	res, err := Run(context.Background(), Config{Stage: StageCompare, PairDir: dir}, Inputs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Manifest.Comparison == nil || res.Manifest.Comparison.Outcome != fixvalidation.OutcomeImprovement {
+		t.Fatalf("outcome %#v", res.Manifest.Comparison)
+	}
+	m := res.Manifest
+	m.State = StateCandidateCaptured
+	m.Comparison = nil
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBytes(t, filepath.Join(dir, FileManifest), append(data, '\n'))
+	return dir
+}
+
+func diagnosisSnaps(t *testing.T, dir string) (before, after map[string]string) {
+	t.Helper()
+	return snap(t, filepath.Join(dir, DirBefore)), snap(t, filepath.Join(dir, DirAfter))
+}
+
+func expectRejectedComparison(t *testing.T, dir string, beforeSnap, afterSnap, compSnap map[string]string, err error, text string) {
+	t.Helper()
+	expectValidation(t, err, text)
+	expectValidation(t, err, "were not repaired")
+	if !sameSnap(beforeSnap, snap(t, filepath.Join(dir, DirBefore))) ||
+		!sameSnap(afterSnap, snap(t, filepath.Join(dir, DirAfter))) ||
+		!sameSnap(compSnap, snap(t, filepath.Join(dir, DirComparison))) {
+		t.Fatal("rejected adoption changed a saved stage")
+	}
+	if readManifest(t, dir).State == StateComparisonCompleted {
+		t.Fatal("rejected comparison was adopted")
+	}
+	if temps := pairTempFiles(t, dir); len(temps) != 0 {
+		t.Fatalf("temporary files left behind: %v", temps)
+	}
+}
+
+func rewriteJSON(t *testing.T, path string, edit func(map[string]any)) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(mustRead(t, path), &doc); err != nil {
+		t.Fatal(err)
+	}
+	edit(doc)
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBytes(t, path, append(data, '\n'))
+}
+
+func pairTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".ruptiq-pair-") && strings.HasSuffix(name, ".json") {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func baseConfig(dir, stage string) Config {
