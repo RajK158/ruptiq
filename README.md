@@ -1506,20 +1506,39 @@ sample of the experiment JSON, read `regression_lab_degraded` and
 that moment.
 
 A second pair ran only after the first lab was stopped. The lighter lab was started first and
-the heavier lab second, with new files so the first pair was kept:
+the heavier lab second, with new files so the first pair was kept. `go run ./demo/regression-lab`
+keeps running, so start it in one terminal and run the experiment in another.
+
+Terminal A, lighter lab:
 
 ```sh
 go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 1h -baseline-iters 157135 -degraded-iters 11233031
+```
+
+Terminal B, from the repository root:
+
+```sh
 go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/repeat-fast-experiment.json
 go run ./cmd/ruptiq-analyze -in tmp/fix-validation/repeat-fast-experiment.json -out tmp/fix-validation/repeat-fast-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
 ```
 
-Stop that process, then:
+Stop Terminal A with Ctrl+C and confirm nothing is still listening on `127.0.0.1:8090`. Then
+start the heavier lab in Terminal A:
 
 ```sh
 go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 0s -baseline-iters 157135 -degraded-iters 11233031
+```
+
+Terminal B:
+
+```sh
 go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/repeat-slow-experiment.json
 go run ./cmd/ruptiq-analyze -in tmp/fix-validation/repeat-slow-experiment.json -out tmp/fix-validation/repeat-slow-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+Stop the heavier lab in Terminal A. With both analyses saved, compare them in Terminal B:
+
+```sh
 go run ./cmd/ruptiq-validate-fix -before tmp/fix-validation/repeat-fast-analysis.json -after tmp/fix-validation/repeat-slow-analysis.json -out tmp/fix-validation/repeat-validation.json
 ```
 
