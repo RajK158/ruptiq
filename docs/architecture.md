@@ -922,8 +922,9 @@ and that step still does not identify a cause.
 `internal/diagnosis` and `ruptiq-diagnose` are the one-command path through the three stages
 above. The package calls `experiment.Coordinator.Run`, then `analysis.Analyze` on the saved
 experiment report, then `investigation.Investigate` on the saved analysis. It does not estimate
-quantiles, compare windows, or rank findings itself. `ruptiq-validate-fix` is unchanged and is
-still the only before/after comparison.
+quantiles, compare windows, or rank findings itself. `ruptiq-validate-fix` is unchanged and
+still compares two analysis files. `ruptiq-validate-runs` compares two saved diagnosis directories
+by calling `fixvalidation.Compare`.
 
 ```
 flags + runner + reader
@@ -995,6 +996,56 @@ a workload error, cancellation, timeout, invalid configuration, output collision
 a failed later stage that leaves the experiment file valid, secret redaction, the manifest, schema
 decoding through `analysis.DecodeExperiment` and `investigation.DecodeAnalysis`, and resolution of
 the investigation's evidence pointers in the saved analysis.
+
+## Comparison of two saved diagnosis runs
+
+`internal/runvalidation` and `ruptiq-validate-runs` compare two directories produced by
+`ruptiq-diagnose`. The package checks each manifest and analysis, then calls
+`fixvalidation.Compare`. It does not reimplement throughput, 5xx ratios, histogram quantiles, or
+ranking. It does not start k6 or modify either input directory. The user runs the two diagnoses
+separately; this command does not run them and does not apply a code or deployment change.
+
+```
+before-dir/manifest.json + analysis.json + experiment.json
+after-dir/manifest.json  + analysis.json + experiment.json
+        |
+        |  schema, artifact names, analysis stage succeeded,
+        |  analysis.json matches analysis.Analyze(experiment.json)
+        v
+fixvalidation.Compare
+        |
+        v
+out-dir/validation.json   existing fixvalidation.Report
+out-dir/manifest.json     run-validation schema 1
+```
+
+An input is refused when its diagnosis schema is unsupported, its analysis stage did not succeed,
+`analysis.json` is missing or is not the analysis of the saved experiment, the manifest names a
+different artifact, or `.ruptiq-diagnose-reservation` is present. That reservation is not deleted.
+An investigation outcome of `insufficient_evidence` is accepted. An experiment status of `failed`
+or incomplete telemetry is accepted when the saved analysis is one `fixvalidation.Compare` can
+judge; the status is kept on the manifest as a limitation. `fixvalidation.Compare` remains the
+authority for `improvement_observed`, `regression_observed`, `mixed`, `no_material_change`,
+`insufficient_evidence`, and `not_comparable`. The last two are successful comparisons.
+
+Paths are resolved with `EvalSymlinks` before the directories are accepted, so a symlink or
+junction cannot make the two inputs the same directory or put the output inside an input.
+When the two analysis files have the same SHA-256, the outcome from `fixvalidation.Compare`
+is kept and the manifest records that the files are one saved analysis, not independent
+evidence of a change.
+
+The output directory is owned by an exclusive `.ruptiq-validate-runs-reservation` file, created
+with `O_EXCL` after the inputs have been accepted and removed when the command returns. A second
+process fails while it exists. A reservation left by a crash is not deleted because of its age.
+`validation.json` and `manifest.json` are renamed into place from temporary files, and an output
+directory that already contains either name is refused. Stored labels are `before` and `after`.
+Each input records the SHA-256 of the `analysis.json` bytes that were compared. Evidence pointers
+keep the `side` and JSON pointer produced by fix-validation, so a pointer into the before analysis
+is read from that directory's `analysis.json`.
+
+Exit status is 0 when a comparison was written, 2 for invalid arguments or an output collision,
+and 3 when an input cannot be read or a result cannot be written. Tests build diagnosis
+directories from synthetic experiments and do not start k6.
 
 ## Fix validation: before and after
 
