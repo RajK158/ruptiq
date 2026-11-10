@@ -1,4 +1,4 @@
-#Project Ruptiq
+# Project Ruptiq
 
 **Find the breaking point. Fix the bottleneck.**
 
