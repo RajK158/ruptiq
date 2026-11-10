@@ -942,8 +942,12 @@ investigation.DecodeAnalysis + investigation.Investigate --> investigation.json
 manifest.json (outcome, stage statuses, schema versions, relative names, limitations)
 ```
 
-The output directory is created if needed and refused when any of the four file names is already
-present. Each file is renamed into place from a temporary file in that directory. Artifact names
+The output directory is created if needed. Ownership is an exclusive
+`.ruptiq-diagnose-reservation` file (`O_EXCL`), taken before the workload starts and removed
+when the run finishes, fails, or is cancelled. A second process fails while that file exists
+and does not delete a reservation because of its age. After the reservation is held, an output
+directory that already contains one of the four report names is refused. Each report is renamed
+into place from a temporary file in that directory. Artifact names
 are fixed (`experiment.json`, `analysis.json`, `investigation.json`, `manifest.json`); a name
 that would leave the directory is rejected. The manifest stores those names, not absolute paths,
 and stores URLs only after `workload.RedactURL`. Stage errors pass through `workload.RedactText`.

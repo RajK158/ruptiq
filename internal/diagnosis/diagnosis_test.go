@@ -369,6 +369,122 @@ func TestManifestIsRelativeAndVersioned(t *testing.T) {
 	}
 }
 
+func TestConcurrentRunIsRejectedBeforeWorkload(t *testing.T) {
+	dir := t.TempDir()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var unblock sync.Once
+	stop := func() { unblock.Do(func() { close(release) }) }
+	defer stop()
+	first := &callRunner{fn: func(ctx context.Context, spec workload.Spec) (workload.Result, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return workload.Result{}, ctx.Err()
+		}
+		return healthyResult(spec), nil
+	}}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), passedConfig(dir), Inputs{Runner: first, Reader: &scriptReader{}})
+		errCh <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first diagnosis did not reach the workload")
+	}
+	if _, err := os.Stat(filepath.Join(dir, reservationFile)); err != nil {
+		t.Fatal(err)
+	}
+	second := &callRunner{fn: func(context.Context, workload.Spec) (workload.Result, error) {
+		t.Error("second workload started")
+		return workload.Result{}, errors.New("second workload")
+	}}
+	_, err := Run(context.Background(), passedConfig(dir), Inputs{Runner: second, Reader: &scriptReader{}})
+	if second.calls() != 0 {
+		t.Fatalf("second workload calls = %d", second.calls())
+	}
+	var verr *ValidationError
+	if !errors.As(err, &verr) || !strings.Contains(err.Error(), reservationFile) {
+		t.Fatalf("second run error = %v", err)
+	}
+	stop()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, reservationFile)); !os.IsNotExist(err) {
+		t.Fatalf("reservation after success: %v", err)
+	}
+	before := mustRead(t, dir, FileExperiment)
+	third := &callRunner{fn: func(context.Context, workload.Spec) (workload.Result, error) {
+		t.Error("third workload started")
+		return workload.Result{}, errors.New("third workload")
+	}}
+	_, err = Run(context.Background(), passedConfig(dir), Inputs{Runner: third, Reader: &scriptReader{}})
+	if err == nil || third.calls() != 0 {
+		t.Fatalf("third run err=%v calls=%d", err, third.calls())
+	}
+	if got := mustRead(t, dir, FileExperiment); got != before {
+		t.Fatal("existing experiment.json changed")
+	}
+}
+
+func TestReservationReleasedOnFailureAndCancellation(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Run(context.Background(), passedConfig(dir), Inputs{
+		Runner: &callRunner{fn: func(context.Context, workload.Spec) (workload.Result, error) {
+			return workload.Result{}, errors.New("workload failed")
+		}},
+		Reader: &scriptReader{},
+	})
+	if err == nil {
+		t.Fatal("expected workload failure")
+	}
+	if _, err := os.Stat(filepath.Join(dir, reservationFile)); !os.IsNotExist(err) {
+		t.Fatalf("reservation after failure: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = Run(cancelled, passedConfig(dir), Inputs{Runner: gateRunner{block: true}, Reader: &scriptReader{}})
+	if err == nil {
+		t.Fatal("expected cancellation")
+	}
+	if _, err := os.Stat(filepath.Join(dir, reservationFile)); !os.IsNotExist(err) {
+		t.Fatalf("reservation after cancellation: %v", err)
+	}
+}
+
+func TestStaleReservationIsNotDeleted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, reservationFile)
+	const body = "pid 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &callRunner{fn: func(context.Context, workload.Spec) (workload.Result, error) {
+		t.Error("workload started against a reserved directory")
+		return workload.Result{}, errors.New("started")
+	}}
+	_, err := Run(context.Background(), passedConfig(dir), Inputs{Runner: runner, Reader: &scriptReader{}})
+	if err == nil || runner.calls() != 0 {
+		t.Fatalf("err=%v calls=%d", err, runner.calls())
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != body {
+		t.Fatalf("reservation body = %q", got)
+	}
+}
+
 func passedConfig(dir string) Config {
 	return Config{
 		OutputDir: dir,
@@ -458,6 +574,37 @@ func hist(fast, slow uint64) *telemetry.HistogramValue {
 	}
 	h.Buckets = append(h.Buckets, telemetry.Bucket{UpperBound: telemetry.Float(math.Inf(1)), CumulativeCount: count})
 	return h
+}
+
+type callRunner struct {
+	fn func(context.Context, workload.Spec) (workload.Result, error)
+	mu sync.Mutex
+	n  int
+}
+
+func (r *callRunner) Run(ctx context.Context, spec workload.Spec) (workload.Result, error) {
+	r.mu.Lock()
+	r.n++
+	r.mu.Unlock()
+	return r.fn(ctx, spec)
+}
+
+func (r *callRunner) calls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.n
+}
+
+func healthyResult(spec workload.Spec) workload.Result {
+	return workload.Result{
+		Runner: "fake", RunnerVersion: "0",
+		VUs: spec.VUs, ConfiguredDurationSeconds: spec.Duration.Seconds(),
+		StartedAt: time.Now().Add(-time.Second).UTC(), FinishedAt: time.Now().UTC(),
+		Metrics: workload.Metrics{
+			DurationSeconds: 1, HTTPRequests: 1000, RequestsPerSecond: 1000,
+			LatencyMs: workload.Latency{Avg: 1, Min: 0.1, P50: 1, P90: 2, P95: 3, Max: 4},
+		},
+	}
 }
 
 type gateRunner struct {

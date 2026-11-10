@@ -63,11 +63,15 @@ type config struct {
 
 func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("ruptiq-diagnose", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	// Discard the parser's own text. It quotes the raw flag value before the
+	// caller can redact credentials or query strings.
+	fs.SetOutput(io.Discard)
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: ruptiq-diagnose -url URL -metrics-url URL -out-dir DIR [flags]")
 		fmt.Fprintln(stderr, "Runs one experiment, analyses it, and investigates that analysis. Writes experiment.json, analysis.json, investigation.json, and manifest.json.")
+		fs.SetOutput(stderr)
 		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
 	}
 
 	var c config
@@ -112,10 +116,14 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 	fs.Float64Var(&inv.ThroughputDecrease, "throughput-decrease", iDef.ThroughputDecrease, "smallest relative fall of the request rate (0.3 = -30%)")
 
 	if err := fs.Parse(args); err != nil {
-		return config{}, err
+		if errors.Is(err, flag.ErrHelp) {
+			return config{}, err
+		}
+		return config{}, fmt.Errorf("%s", workload.RedactText(err.Error(), ""))
 	}
 	if fs.NArg() > 0 {
-		return config{}, fmt.Errorf("unexpected arguments: %q", fs.Args())
+		shown := workload.RedactText(fmt.Sprintf("%q", fs.Args()), "")
+		return config{}, fmt.Errorf("unexpected arguments: %s", shown)
 	}
 	c.diagnosis = c.diagnosis.WithDefaults()
 	var problems []string
@@ -134,6 +142,9 @@ func parseArgs(args []string, stderr io.Writer) (config, error) {
 		problems = append(problems, "k6 path must not be empty")
 	}
 	if len(problems) > 0 {
+		for i, p := range problems {
+			problems[i] = workload.RedactText(p, "")
+		}
 		return config{}, &diagnosis.ValidationError{Problems: problems}
 	}
 	return c, nil
@@ -144,7 +155,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, newRunner
 	c, err := parseArgs(args, stderr)
 	if err != nil {
 		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(stderr, "ruptiq-diagnose:", err)
+			fmt.Fprintln(stderr, "ruptiq-diagnose:", workload.RedactText(err.Error(), ""))
 		}
 		return exitUsage
 	}

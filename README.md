@@ -1238,6 +1238,10 @@ contains a slash is resolved against the current directory before k6 starts, bec
 temporary directory. A bare name such as `k6` is still found on `PATH`. The directory is
 created when it is missing. If it already contains `experiment.json`, `analysis.json`,
 `investigation.json`, or `manifest.json`, the command stops and leaves those files alone.
+While a diagnosis runs it owns the directory by exclusively creating
+`.ruptiq-diagnose-reservation`. A second process fails before starting a workload if that
+file exists, and the file is removed when the run finishes, fails, or is cancelled. A
+reservation left by a crashed process is not deleted automatically.
 Generated runs belong under `tmp/`, which Git ignores.
 
 Ctrl+C cancels the experiment. The experiment report is kept when the coordinator produced one.

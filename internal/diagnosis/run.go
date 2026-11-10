@@ -38,8 +38,16 @@ func Run(ctx context.Context, cfg Config, in Inputs) (Result, error) {
 	if in.Runner == nil || in.Reader == nil {
 		return Result{}, &ValidationError{Problems: []string{"a workload runner and a telemetry reader are required"}}
 	}
-	dir, err := prepareDir(cfg.OutputDir)
+	dir, err := ensureOutputDir(cfg.OutputDir)
 	if err != nil {
+		return Result{}, err
+	}
+	release, err := reserveOutputDir(dir)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
+	if err := rejectExistingArtifacts(dir); err != nil {
 		return Result{}, err
 	}
 

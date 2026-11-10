@@ -20,6 +20,9 @@ func TestUsageAndInvalidConfig(t *testing.T) {
 	if code := run(context.Background(), []string{"-h"}, &stdout, &stderr, nil, nil); code != exitUsage {
 		t.Fatalf("help exit = %d", code)
 	}
+	if !strings.Contains(stderr.String(), "Usage:") || !strings.Contains(stderr.String(), "-out-dir") {
+		t.Fatalf("help text = %s", stderr.String())
+	}
 	stderr.Reset()
 	if code := run(context.Background(), nil, &stdout, &stderr, nil, nil); code != exitUsage {
 		t.Fatalf("no args exit = %d, stderr %s", code, stderr.String())
@@ -31,6 +34,54 @@ func TestUsageAndInvalidConfig(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "unexpected") {
 		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestParseErrorsRedactSecrets(t *testing.T) {
+	const userSecret = "s3cret-user"
+	const querySecret = "s3cret-token"
+	raw := "http://user:" + userSecret + "@127.0.0.1/work?token=" + querySecret
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "positional",
+			args: append(baseArgs(t.TempDir()), raw),
+			want: "unexpected",
+		},
+		{
+			name: "flag",
+			args: []string{"-duration", raw, "-url", "http://127.0.0.1/work", "-metrics-url", "http://127.0.0.1/metrics", "-out-dir", t.TempDir()},
+			want: "invalid",
+		},
+		{
+			name: "url",
+			args: []string{"-url", raw + "#frag", "-metrics-url", "http://127.0.0.1/metrics", "-out-dir", t.TempDir()},
+			want: "fragment",
+		},
+		{
+			name: "config",
+			args: []string{"-url", raw, "-metrics-url", "http://127.0.0.1/metrics", "-out-dir", t.TempDir(), "-min-windows", "0"},
+			want: "min windows",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), tc.args, &stdout, &stderr, nil, nil)
+			if code != exitUsage {
+				t.Fatalf("exit = %d, stderr %s", code, stderr.String())
+			}
+			blob := stdout.String() + stderr.String()
+			if strings.Contains(blob, userSecret) || strings.Contains(blob, querySecret) {
+				t.Fatalf("secret leaked:\n%s", blob)
+			}
+			if !strings.Contains(blob, tc.want) {
+				t.Fatalf("stderr = %s", stderr.String())
+			}
+		})
 	}
 }
 
