@@ -1047,6 +1047,69 @@ Exit status is 0 when a comparison was written, 2 for invalid arguments or an ou
 and 3 when an input cannot be read or a result cannot be written. Tests build diagnosis
 directories from synthetic experiments and do not start k6.
 
+## Guided before/after workflow
+
+`internal/pairworkflow` and `ruptiq-pair` run the diagnosis and the run-validation comparison
+as three explicit invocations: `before`, `after`, and `compare`. The process exits at the end
+of each one. It does not apply a change, restart a service, or start the next stage.
+
+```
+-stage before  + runner + reader
+        |
+        v
+diagnosis.Run --> pair-dir/before/   (experiment, analysis, investigation, manifest)
+        |
+        |  process exits; the developer changes the service outside Ruptiq
+        v
+-stage after   (same workload settings; rejected before k6 if they differ)
+        |
+        v
+diagnosis.Run --> pair-dir/after/
+        |
+        |  process exits
+        v
+-stage compare
+        |
+        v
+runvalidation.Run --> pair-dir/comparison/validation.json
+                      pair-dir/comparison/manifest.json
+pair-dir/pair-manifest.json records the workflow state
+```
+
+`before` and `after` call `diagnosis.Run`. `compare` calls `runvalidation.Run`, which calls
+`fixvalidation.Compare`. This package does not estimate quantiles, rank findings, or duplicate
+the comparison. The pair manifest stores a redacted configuration fingerprint and the SHA-256
+of each original target and metrics URL. Those hashes are consistency fingerprints. They are
+not a secure substitute for protecting a short or guessable secret. The raw user information
+and query string are not stored, and a hash is not computed from the redacted URL. The after
+stage compares that fingerprint, including virtual users, duration, scrape interval, sampling
+limits, metric families, labels, and minimum histogram observations, and refuses to start a
+workload when they differ. If the original URL hashes are missing, the after workload is
+refused as well. Two saved diagnoses can still be compared: `compare` calls `runvalidation.Run`
+when `comparison/` is empty. A manifest that is only behind a finished `comparison/` is updated
+from those files and does not run the comparison again. `fixvalidation.Compare` remains the
+authority for whether the two saved runs are comparable and for the six outcomes.
+
+The states `baseline_captured`, `candidate_captured`, and `comparison_completed` are written
+only when the corresponding diagnosis or comparison files are complete. A failed diagnosis, a
+partial directory, or a cancellation is `failed` or `interrupted`. The pair manifest is updated
+after the stage reports are written. It is not a transaction across those files. On resume the
+stage directories are read again; a manifest that claims a file which is missing or whose
+analysis hash differs is rejected and is not repaired.
+
+The pair directory is owned by an exclusive `.ruptiq-pair-reservation` file, created with
+`O_EXCL` and removed when the invocation returns. A reservation left by a crash is not deleted
+because of its age. Diagnosis and run validation keep their own reservations inside `before/`,
+`after/`, and `comparison/`. Those files are not deleted by the pair workflow. Stage paths are
+resolved with `Readlink` and `EvalSymlinks`, so a symlink or junction cannot point a stage at
+another stage or outside the pair directory. Completed reports are not replaced.
+
+`not_comparable` and `insufficient_evidence` are successful compare invocations. An
+investigation abstention is a completed diagnosis stage. Neither one is an observed
+improvement. One pair is not a cause and not a statistical significance test.
+
+Tests use a fake runner and reader, or synthetic diagnosis directories. They do not start k6.
+
 ## Fix validation: before and after
 
 `internal/fixvalidation` compares two saved analyses. The command is `ruptiq-validate-fix`. It is
@@ -1748,12 +1811,19 @@ checkout works across the three containers.
   and on one live controlled change from the regression lab.
 - `cmd/ruptiq-diagnose`, `internal/diagnosis`: one command that runs an experiment, analyses the
   saved report, and investigates that analysis. Orchestration only. Abstention is a completed
-  investigation. Before/after comparison remains `ruptiq-validate-fix`. Unit tested with fake
+  investigation. Before/after comparison of two analysis files remains `ruptiq-validate-fix`. Unit tested with fake
   runners and readers, and run once against the regression lab (see above).
 - `cmd/ruptiq-validate-fix`, `internal/fixvalidation`: offline before/after comparison of two
   saved analyses. Server throughput, 5xx ratio, and the median of per-window p95 estimates, with
   evidence pointers. Run on synthetic analyses and on two live regression-lab pairs. An observed
   improvement is not a proven or repeatable fix.
+- `cmd/ruptiq-validate-runs`, `internal/runvalidation`: offline comparison of two saved
+  diagnosis directories. It calls `fixvalidation.Compare`. It does not run a workload or apply
+  a change.
+- `cmd/ruptiq-pair`, `internal/pairworkflow`: three explicit invocations that capture a baseline
+  diagnosis, stop for a change applied outside Ruptiq, capture a candidate, and compare the two
+  saved diagnoses through `runvalidation.Run`. Unit tested with fake runners and synthetic
+  diagnoses. One observed improvement is not a cause.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
   timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline
   and a two-run before/after comparison.
