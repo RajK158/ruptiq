@@ -966,6 +966,24 @@ while POST `/reservations` has too few requests to judge. A unit fixture with 10
 and a 20 ms median window p95, then 1400 requests/s and a 4 ms median in a non-overlapping
 bucket, yields `improvement_observed` (+40% throughput, −80% median p95).
 
+A live check on the regression lab used the same default thresholds and did not change them.
+One lab process with `-degrade-after 0s` and fixed iteration counts (`-baseline-iters 157135`,
+`-degraded-iters 11233031`) was the heavier run. After that process was stopped, a second
+process on `127.0.0.1:8090` with `-degrade-after 1h` and the same counts was the lighter run.
+Both used k6 v2.3.0, 2 VUs, 20s, and a 1s interval. The saved gauges matched the mode: the
+heavier run was degraded at 11233031 iterations during the workload, and the lighter run stayed
+at 0 and 157135. Eligible `GET /work` windows compared as 114.1 → 2374.1 requests/s (+1980.6%)
+and median window p95 24.250 ms → 0.951 ms (−96.1%), bucket unions 10–100 ms and 0.500–1.000 ms,
+5xx ratio 0% on both sides. The outcome was `improvement_observed`. A second pair, saved in
+separate files and run lighter-then-heavier, was `regression_observed` (2561.8 → 132.8
+requests/s, −94.8% throughput; 0.950 → 24.215 ms, +2448.4% median window p95; 5xx ratio 0% on
+both sides). Its evidence pointers resolved. The exact commands and the split between expected
+and observed results are in README.md. This is less CPU work in a fixture, not a source patch,
+and two pairs are not a significance test. The numbers are this Windows machine's measurements,
+not a benchmark. The 10–100 ms union came from noisy heavier windows,
+including one p95 estimate in the 50–100 ms bucket; those bounds still did not overlap the
+lighter bucket.
+
 ## Regression lab: a known mid-run change
 
 `demo/regression-lab/` is a validation fixture, not Ruptiq Core and not the checkout demo. It
@@ -1599,9 +1617,11 @@ checkout works across the three containers.
   and on one live controlled change from the regression lab.
 - `cmd/ruptiq-validate-fix`, `internal/fixvalidation`: offline before/after comparison of two
   saved analyses. Server throughput, 5xx ratio, and the median of per-window p95 estimates, with
-  evidence pointers. An observed improvement is not a proven or repeatable fix.
+  evidence pointers. Run on synthetic analyses and on two live regression-lab pairs. An observed
+  improvement is not a proven or repeatable fix.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
-  timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline.
+  timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline
+  and a two-run before/after comparison.
 - `demo/checkout/order-service`: the Order Service (`GET /healthz`, `POST /orders`,
   `GET /orders/{id}`, `POST /orders/{id}/reserve`, `POST /orders/{id}/pay`), with in-memory
   storage. It reserves stock by calling the Inventory Service and takes simulated payments by

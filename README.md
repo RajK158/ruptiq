@@ -70,7 +70,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Experiment: k6 load test with periodic telemetry sampling (`ruptiq-experiment`) | Done for one HTTP GET workload and one Prometheus endpoint; unit tested with fake runners and readers, and run with the real k6 v2.3.0 against the real Inventory Service (see below) |
 | Offline performance signals from a saved experiment (`ruptiq-analyze`) | Done for HTTP request counters and duration histograms; unit tested with synthetic experiment reports and the experiment package's saved report. Not yet run on a report from a real Inventory Service experiment |
 | Evidence-driven investigation of a saved analysis (`ruptiq-investigate`) | Done for 5xx increases, latency and throughput degradation within one experiment, and abstention; deterministic, unit tested with fake analyses, run offline on the synthetic experiment, and run on a live controlled change from `demo/regression-lab/` (see below) |
-| Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis. An observed difference is not a cause and not a reproducibility result |
+| Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -1307,6 +1307,10 @@ p95 at 4 ms inside the bucket from 2 ms to 5 ms:
 The outcome is `improvement_observed`. The same shape with the numbers reversed is
 `regression_observed`. A higher request rate together with a higher 5xx ratio is `mixed`.
 
+A live pair of regression-lab experiments, one with the heavier CPU loop and one with the
+lighter loop, is recorded under [Before and after runs](#before-and-after-runs). Those numbers
+are one machine's observations. They are not the synthetic table above.
+
 The checked-in inventory analysis compared with itself is `no_material_change`. Its two eligible
 windows are windows 2 and 3 (windows 1 and 4 touch the start or the end of the load). For
 `GET /inventory/{sku}` those windows contain 3000 and 3020 requests over 1.008 s and 1.490 s, so
@@ -1431,6 +1435,158 @@ Every evidence pointer in that investigation resolved to an object in the saved 
 output matched the controlled switch: later windows were the slow, low-rate ones, and the
 independent `regression_lab_degraded` gauge flipped at 10s. This does **not** show a CPU, database,
 or network bottleneck in a real application; the lab added CPU work on purpose.
+
+### Before and after runs
+
+This check uses two separate experiments against the same lab process shape, not one experiment
+that changes mode in the middle. The "improvement" is the lab doing less CPU work per `GET /work`.
+It is not a source patch, and `ruptiq-validate-fix` is not applying or proving a fix.
+
+Both experiments use one machine, `http://127.0.0.1:8090/work`, `http://127.0.0.1:8090/metrics`,
+k6 v2.3.0, 2 VUs, a 20s workload, a 1s scrape interval, and the same analysis metric names.
+Iteration counts are passed explicitly (`-baseline-iters 157135`, `-degraded-iters 11233031`)
+so the two processes do not recalibrate. Run only one lab at a time. Stop it before starting
+the next. Reports stay in gitignored `tmp/`.
+
+#### Expected behavior
+
+With `-degrade-after 0s`, the first `GET /work` enters the heavier loop immediately. Samples
+taken while that workload is running should show `regression_lab_degraded` 1 and
+`regression_lab_work_iterations` 11233031. The scrape taken before any `/work` can still show
+0 and 157135, because the gauges start in baseline until the first `/work`.
+
+With `-degrade-after 1h`, a 20s workload should finish before the timer. Every sample should
+show `regression_lab_degraded` 0 and `regression_lab_work_iterations` 157135.
+
+The lighter run should complete more server requests per second, and its median per-window p95
+should sit in an earlier histogram bucket than the heavier run. The 5xx ratio should stay 0%
+when requests were completed. Default thresholds are left unchanged. `GET /healthz` receives
+no load, so that route should not be treated as a performance improvement. Swapping which run
+is "before" should swap the direction of the judged changes. Two pairs still do not show
+statistical significance or that the result would recur on another machine.
+
+#### Commands
+
+Portable k6 v2.3.0 was used through `-k6`. `RUPTIQ_K6_PATH` or a `k6` on `PATH` is the same
+binary if it is that version. In one terminal, start the heavier lab:
+
+```sh
+mkdir -p tmp/fix-validation
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 0s -baseline-iters 157135 -degraded-iters 11233031
+```
+
+In another terminal, from the repository root:
+
+```sh
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/before-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/fix-validation/before-experiment.json -out tmp/fix-validation/before-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+Stop the lab (Ctrl+C) and confirm nothing is still listening on `127.0.0.1:8090`. Start the
+lighter lab on the same address:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 1h -baseline-iters 157135 -degraded-iters 11233031
+```
+
+```sh
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/after-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/fix-validation/after-experiment.json -out tmp/fix-validation/after-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+Stop that lab as well, then compare with the default thresholds:
+
+```sh
+go run ./cmd/ruptiq-validate-fix -before tmp/fix-validation/before-analysis.json -after tmp/fix-validation/after-analysis.json -out tmp/fix-validation/validation.json
+```
+
+The mode check is the saved telemetry, which is the Prometheus text the lab exposed. In each
+sample of the experiment JSON, read `regression_lab_degraded` and
+`regression_lab_work_iterations`. `GET /metrics` on the running lab shows the same gauges at
+that moment.
+
+A second pair ran only after the first lab was stopped. The lighter lab was started first and
+the heavier lab second, with new files so the first pair was kept:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 1h -baseline-iters 157135 -degraded-iters 11233031
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/repeat-fast-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/fix-validation/repeat-fast-experiment.json -out tmp/fix-validation/repeat-fast-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+Stop that process, then:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 0s -baseline-iters 157135 -degraded-iters 11233031
+go run ./cmd/ruptiq-experiment -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -out tmp/fix-validation/repeat-slow-experiment.json
+go run ./cmd/ruptiq-analyze -in tmp/fix-validation/repeat-slow-experiment.json -out tmp/fix-validation/repeat-slow-analysis.json -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+go run ./cmd/ruptiq-validate-fix -before tmp/fix-validation/repeat-fast-analysis.json -after tmp/fix-validation/repeat-slow-analysis.json -out tmp/fix-validation/repeat-validation.json
+```
+
+#### Actually observed results
+
+One development machine, Windows, portable k6 v2.3.0, commit `5b5473e`. The commands above
+were run from binaries built from that commit into gitignored `tmp/bin`, with the same flags.
+Nothing in the comparison thresholds or the saved JSON was edited afterward. The numbers below
+are what this Windows machine measured in these runs. They are not a benchmark.
+
+| | Heavier CPU (`-degrade-after 0s`) | Lighter CPU (`-degrade-after 1h`) |
+| --- | --- | --- |
+| k6 | 2300 requests, 115.0 req/s, 0% failed, avg 17.299 ms, p95 25.750 ms, max 216.348 ms, 20.01s | 47325 requests, 2366.1 req/s, 0% failed, avg 0.811 ms, p50 0.744 ms, p95 1.232 ms, max 71.328 ms, 20.00s |
+| Prometheus | 22 of 22 scrapes (1 before, 20 during, 1 after) | 22 of 22 scrapes (1 before, 20 during, 1 after) |
+| `regression_lab_degraded` | 0 on sample #1 (before any `/work`); 1 on samples #2–#22 | 0 on all 22 samples |
+| `regression_lab_work_iterations` | 157135 on sample #1; 11233031 on samples #2–#22 | 157135 on all 22 samples |
+| Server, all analysis windows, `GET /work` | 2300 requests in 20.202s (113.9 req/s), p95 estimate ~24.571 ms, 0 of 2300 5xx | 47325 requests in 20.160s (2347.5 req/s), p95 estimate ~0.951 ms in the 0.500–1.000 ms bucket, 0 of 47325 5xx |
+
+`ruptiq-validate-fix` called the files comparable. Each side had 21 windows and 19 eligible
+windows (2–20). Windows 1 and 21 touch the start or the end of the load and were excluded.
+Default thresholds were kept.
+
+For eligible `GET /work` windows the validator measured:
+
+| Signal | Before (heavier) | After (lighter) | Result |
+| --- | --- | --- | --- |
+| Throughput | 2168 requests / 18.9999s = 114.1 req/s | 45106 requests / 18.9993s = 2374.1 req/s | +1980.6%, improvement |
+| 5xx ratio | 0.00% (0 of 2168) | 0.00% (0 of 45106) | no material change |
+| Median window p95 | 24.250 ms, bucket union 10 ms–100 ms | 0.951 ms, bucket union 0.500 ms–1.000 ms | −96.1%, improvement |
+
+The outcome was `improvement_observed`. Ranked findings, regressions first:
+
+1. `GET /work` throughput, improvement, +1980.6%.
+2. `GET /work` p95, improvement, −96.1%.
+
+The first throughput pointer is `/analysis/windows/1/routes/1/requests` (analysis window 2,
+136 requests in the heavier file). The first p95 pointer is
+`/analysis/windows/1/routes/1/latency/p95` (0.024221 s, bucket 10–25 ms). All 76 `GET /work`
+evidence pointers in the validation report resolved to an object in the file named by that
+side. `GET /healthz` had no requests. Its throughput is 0.0 → 0.0 requests/s
+(`no_material_change`), its 5xx ratio is undefined on both sides, and its latency has no
+eligible windows. The only comparability warning is that the k6 client results differ; they
+are not part of the server-side outcome.
+
+The heavier run was noisy. Eligible window 8 estimated p95 at 71.25 ms (50–100 ms bucket,
+46 requests) and other windows reached the 25–50 ms bucket, so the before bucket union is
+10–100 ms rather than only 10–25 ms. That union still does not overlap 0.500–1.000 ms.
+
+The reversed pair was completed. The lighter run started at 00:06:44Z and the heavier run at
+00:07:37Z, after the lighter process had stopped. Their experiment files are separate from the
+first pair. The lighter run came first (k6: 50896 requests, 2544.7 req/s, 0 failed, p95 1.138 ms;
+22 of 22 scrapes; every sample degraded 0 and 157135 iterations). The heavier run came second
+(k6: 2646 requests, 132.2 req/s, 0 failed, p95 17.859 ms; 22 of 22 scrapes; sample #1 was still
+baseline, and samples #2–#22 were degraded at 11233031 iterations).
+
+Comparing the lighter analysis as before and the heavier analysis as after was
+`regression_observed`. Eligible `GET /work` windows: throughput 48671 requests / 18.9990s =
+2561.8 req/s → 2523 requests / 19.0009s = 132.8 req/s (−94.8%); median window p95 0.950 ms →
+24.215 ms (+2448.4%), buckets `[0.500 ms, 1.000 ms]` to `[10.000 ms, 25.000 ms]`; 5xx ratio
+0.00% on both sides (0 of 48671, then 0 of 2523). Windows 1 and 21 were excluded on both sides.
+No `GET /work` signal was inconclusive. Ranked findings were p95 regression first, then
+throughput regression. All 76 `GET /work` evidence pointers resolved. The first request pointer,
+`/analysis/windows/1/routes/1/requests`, is 2582 requests in the lighter file, and the matching
+p95 is 0.000950 s in the 0.500–1.000 ms bucket. The k6 warning is the same as the first pair.
+The direction followed the CPU mode. The percentages are not the same size as the first pair.
+Two observations are not a significance test and not evidence the same magnitudes would appear
+again.
 
 ### Options
 
