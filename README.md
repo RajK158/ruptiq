@@ -6,6 +6,103 @@ Ruptiq is an intelligent performance testing platform for distributed systems. T
 push a system under test until it breaks, then help engineers understand *why* it broke and
 what to fix first.
 
+## Install Ruptiq CLI
+
+Prebuilt development archives contain `ruptiq-pair`, `ruptiq-diagnose`, and `ruptiq-validate-runs`.
+The `CLI distribution builds` job uploads them as a temporary GitHub Actions artifact named
+`ruptiq-cli-development`. Downloading that artifact gives a zip of the five platform archives
+and `ruptiq-cli-SHA256SUMS.txt`. It is not a GitHub Release, not a Git tag, and not a signed
+build. Running these binaries does not require Go.
+
+Unzip the artifact, then check the checksums from that directory.
+
+Linux:
+
+```sh
+sha256sum -c ruptiq-cli-SHA256SUMS.txt
+```
+
+macOS:
+
+```sh
+shasum -a 256 -c ruptiq-cli-SHA256SUMS.txt
+```
+
+On Windows PowerShell, compare one archive with its line in the checksum file:
+
+```powershell
+Get-FileHash .\ruptiq-cli-windows-amd64.zip -Algorithm SHA256
+```
+
+Extract the archive that matches the machine. The examples below start from that extracted
+directory. Windows file names end in `.exe`.
+
+### Windows PowerShell
+
+```powershell
+Expand-Archive .\ruptiq-cli-windows-amd64.zip -DestinationPath .\ruptiq
+.\ruptiq\ruptiq-pair.exe -h
+```
+
+`-h` prints usage to standard error and exits 2. Help is handled as invalid arguments, not as
+exit 0. For the current session, add the directory to `PATH`:
+
+```powershell
+$env:Path += ";$PWD\ruptiq"
+ruptiq-pair.exe -h
+```
+
+### Linux
+
+```sh
+tar -xzf ruptiq-cli-linux-amd64.tar.gz
+./ruptiq-pair -h
+export PATH="$PWD:$PATH"
+```
+
+Use `ruptiq-cli-linux-arm64.tar.gz` on 64-bit ARM.
+
+### macOS Intel
+
+```sh
+tar -xzf ruptiq-cli-darwin-amd64.tar.gz
+./ruptiq-pair -h
+```
+
+### macOS Apple Silicon
+
+```sh
+tar -xzf ruptiq-cli-darwin-arm64.tar.gz
+./ruptiq-pair -h
+```
+
+macOS may quarantine a downloaded unsigned binary. These builds are not notarized. A matching
+checksum does not make the file signed.
+
+### k6 and a first run
+
+`ruptiq-pair -stage before`, `ruptiq-pair -stage after`, and `ruptiq-diagnose` start a live
+workload. They need [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) installed
+separately (developed against v2.3.0). Pass `-k6`, or put `k6` on `PATH`. The archives do not
+include k6.
+
+`ruptiq-pair -stage compare` and `ruptiq-validate-runs` only read saved diagnosis directories.
+They do not need k6.
+
+Exit status for these three commands is 0 when the command finished, including a comparison
+that is not comparable or has insufficient evidence; 2 for invalid arguments, help, a
+configuration mismatch, or a refusal to overwrite saved reports; and 3 when a stage or a saved
+file fails.
+
+A compare that does not start a workload is:
+
+```sh
+ruptiq-pair -stage compare -pair-dir DIR
+```
+
+`DIR` must already contain the before and after diagnoses. Ruptiq does not apply the change
+between those stages.
+
 ## Goals
 
 - Run controlled load against a target application and find where it starts to fail.
@@ -78,6 +175,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
 | Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses, and run once live against `demo/regression-lab` (heavy CPU, then a manual restart in light CPU). One observed improvement is not a cause |
 | Guided workflow integration test in CI (`scripts/guided-workflow-smoke-test.sh`) | Added. GitHub-hosted Ubuntu runs real k6 v2.3.0 and a loopback regression lab through `ruptiq-pair`. This job has not been observed on GitHub yet |
+| CLI distribution archives (`ruptiq-pair`, `ruptiq-diagnose`, `ruptiq-validate-runs`) | Added. CI cross-compiles linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64. The archives are unsigned development artifacts, not a release. This job has not been observed on GitHub yet |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -85,7 +183,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 
 ## Requirements
 
-- Go 1.27 or newer (see the `go` line in `go.mod`).
+- Go 1.27 or newer to build from source (see the `go` line in `go.mod`). A prebuilt CLI archive does not need Go; see Install Ruptiq CLI.
 - Network access the first time you build or test, so Go can download the official Prometheus Go
   libraries (`github.com/prometheus/client_golang`, `client_model`, and `common`). The Inventory
   Service uses the client library to expose metrics; Ruptiq Core uses only the text-format parser
@@ -3081,6 +3179,7 @@ demo/checkout/Dockerfile                 One multi-stage image definition for th
 compose.yaml                             Runs the three checkout services together (Docker Compose)
 scripts/checkout-smoke-test.sh           End-to-end checkout test over HTTP (used by CI)
 scripts/guided-workflow-smoke-test.sh    Real k6 and loopback regression-lab pair workflow (used by CI)
+scripts/package-cli.go                   Builds development CLI archives into dist/ (used by CI)
 .dockerignore                            Allow-list for Docker build contexts
 docs/                                    Design documents
 ```

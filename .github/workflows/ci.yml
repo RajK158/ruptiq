@@ -141,3 +141,68 @@ jobs:
 
       - name: Run guided workflow smoke test
         run: bash scripts/guided-workflow-smoke-test.sh
+
+  # Cross-compiles the workflow CLIs and uploads development archives.
+  # It does not publish a release or create a tag. k6 is not required.
+  cli-dist:
+    name: CLI distribution builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build CLI archives
+        run: go run ./scripts
+
+      - name: Verify SHA-256 checksums
+        working-directory: dist
+        run: sha256sum -c ruptiq-cli-SHA256SUMS.txt
+
+      - name: Smoke-test Linux AMD64 CLI
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          tar -xzf dist/ruptiq-cli-linux-amd64.tar.gz -C "$work"
+          smoke() {
+            local bin="$1"
+            local usage="$2"
+            local out code
+            set +e
+            out="$("$bin" -h 2>&1)"
+            code=$?
+            set -e
+            if [[ "$code" -ne 2 ]]; then
+              printf '%s\n' "$out" >&2
+              echo "$bin -h exited $code, want 2" >&2
+              exit 1
+            fi
+            case "$out" in
+              *"$usage"*) ;;
+              *)
+                printf '%s\n' "$out" >&2
+                echo "$bin -h did not print usage" >&2
+                exit 1
+                ;;
+            esac
+            echo "$bin -h exited 2"
+          }
+          smoke "$work/ruptiq-pair" "Usage: ruptiq-pair"
+          smoke "$work/ruptiq-diagnose" "Usage: ruptiq-diagnose"
+          smoke "$work/ruptiq-validate-runs" "Usage: ruptiq-validate-runs"
+          rm -rf "$work"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ruptiq-cli-development
+          path: |
+            dist/ruptiq-cli-*.tar.gz
+            dist/ruptiq-cli-*.zip
+            dist/ruptiq-cli-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
