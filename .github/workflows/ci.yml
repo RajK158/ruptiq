@@ -88,3 +88,56 @@ jobs:
       - name: Shut down and clean up
         if: always()
         run: docker compose down --volumes --remove-orphans --rmi all
+
+  # Real k6, a loopback regression lab, and ruptiq-pair. Independent of the
+  # Go and Docker jobs. Saved reports stay in a temporary directory and are
+  # not uploaded.
+  guided-workflow:
+    name: Guided workflow integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # k6 v2.3.0, the version used for the recorded local runs. Both
+      # checksums were checked against the official GitHub release assets.
+      # The job fails if either published digest differs from these pins.
+      - name: Install pinned k6 v2.3.0
+        run: |
+          set -euo pipefail
+          version=v2.3.0
+          checksums_url="https://github.com/grafana/k6/releases/download/${version}/k6-${version}-checksums.txt"
+          tarball="k6-${version}-linux-amd64.tar.gz"
+          tarball_url="https://github.com/grafana/k6/releases/download/${version}/${tarball}"
+          checksums_sha256=8ebbfcd5a13d68ac67d488c2b5f28bf901ea22d2fbbfb15f5345d65c39163be2
+          tarball_sha256=39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1
+          curl -fsSL "$checksums_url" -o k6-checksums.txt
+          echo "${checksums_sha256}  k6-checksums.txt" | sha256sum -c -
+          published="$(awk -v file="$tarball" '$2 == file { print $1 }' k6-checksums.txt)"
+          if [[ "$published" != "$tarball_sha256" ]]; then
+            echo "published tarball checksum does not match the pinned digest" >&2
+            exit 1
+          fi
+          curl -fsSL "$tarball_url" -o "$tarball"
+          echo "${tarball_sha256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball"
+          mkdir -p "$HOME/bin"
+          install "k6-${version}-linux-amd64/k6" "$HOME/bin/k6"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Show Go and k6 versions
+        run: |
+          go version
+          k6 version
+
+      - name: Check smoke-test script
+        run: |
+          bash -n scripts/guided-workflow-smoke-test.sh
+          bash scripts/guided-workflow-smoke-test.sh self-check
+
+      - name: Run guided workflow smoke test
+        run: bash scripts/guided-workflow-smoke-test.sh
