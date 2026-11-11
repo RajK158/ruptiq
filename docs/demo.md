@@ -230,8 +230,10 @@ Each of `before/` and `after/` has the same four files.
 
 `investigation.json`
 
-- `outcome` is the single-run finding: `changes_observed`, `no_material_change`, or `insufficient_evidence`.
-- `summary` is one sentence for that one run.
+The file's top-level `investigation` object holds the single-run result.
+
+- `investigation.outcome` is the finding: `changes_observed`, `no_material_change`, or `insufficient_evidence`.
+- `investigation.summary` is one sentence for that one run.
 
 A stable CPU mode often produces `no_material_change` inside one run. That does not say
 the two runs match each other. The comparison in the next files is the cross-run result.
@@ -244,11 +246,11 @@ $exp.telemetry.attempts
 $exp.telemetry.succeeded
 $exp.telemetry.failed
 $inv = Get-Content -Raw tmp\demo-pair\before\investigation.json | ConvertFrom-Json
-$inv.outcome
+$inv.investigation.outcome
 ```
 
 ```sh
-python3 -c 'import json; e=json.load(open("tmp/demo-pair/before/experiment.json")); i=json.load(open("tmp/demo-pair/before/investigation.json")); t=e["telemetry"]; print(e["status"]); print(t["completeness"], t["attempts"], t["succeeded"], t["failed"]); print(i["outcome"])'
+python3 -c 'import json; e=json.load(open("tmp/demo-pair/before/experiment.json")); i=json.load(open("tmp/demo-pair/before/investigation.json")); t=e["telemetry"]; print(e["status"]); print(t["completeness"], t["attempts"], t["succeeded"], t["failed"]); print(i["investigation"]["outcome"])'
 ```
 
 Repeat with `after` in place of `before`.
@@ -260,8 +262,8 @@ Repeat with `after` in place of `before`.
 - `validation.outcome` is one of `improvement_observed`, `regression_observed`, `mixed`, `no_material_change`, `insufficient_evidence`, or `not_comparable`.
 - `validation.comparability.comparable` is true when the runs were accepted as the same test. `not_comparable` is a finished result, not a crashed command.
 - `validation.routes[]` has `method`, `route`, `throughput`, and `latency`.
-- For `GET` and `/work`, `throughput.before.value` and `throughput.after.value` are server request rates. `unit` is `requests/s`. `relative` is the relative change.
-- `latency.before.value` and `latency.after.value` are the median of the per-window p95 estimates. `unit` is `seconds`. `estimate` is true. This is not an exact percentile.
+- For `GET` and `/work`, `throughput.before.value` and `throughput.after.value` are server request rates. The unit is on each measurement: `throughput.before.unit` and `throughput.after.unit` are `requests/s`. `throughput.relative` is the relative change.
+- `latency.before.value` and `latency.after.value` are the median of the per-window p95 estimates. `latency.before.unit` and `latency.after.unit` are `seconds`. `latency.before.estimate` and `latency.after.estimate` are true. This is not an exact percentile.
 - `throughput.evidence[]` and `latency.evidence[]` have `side` (`before` or `after`) and `pointer`. The pointer is a JSON pointer into that side's `analysis.json`, not into `validation.json`.
 
 `comparison/manifest.json`
@@ -276,10 +278,10 @@ $v.comparability.comparable
 $work = $v.routes | Where-Object { $_.method -eq "GET" -and $_.route -eq "/work" }
 $work.throughput.before.value
 $work.throughput.after.value
-$work.throughput.unit
+$work.throughput.before.unit
 $work.latency.before.value
 $work.latency.after.value
-$work.latency.unit
+$work.latency.before.unit
 $work.throughput.evidence | Select-Object side, pointer
 ```
 
@@ -287,8 +289,8 @@ $work.throughput.evidence | Select-Object side, pointer
 python3 -c 'import json; v=json.load(open("tmp/demo-pair/comparison/validation.json"))["validation"]; print(v["outcome"]); print(v["comparability"]["comparable"]);
 r=next(x for x in v["routes"] if x["method"]=="GET" and x["route"]=="/work");
 t=r["throughput"]; L=r["latency"];
-print(t["before"]["value"], t["after"]["value"], t["unit"]);
-print(L["before"]["value"], L["after"]["value"], L["unit"]);
+print(t["before"]["value"], t["after"]["value"], t["before"]["unit"]);
+print(L["before"]["value"], L["after"]["value"], L["before"]["unit"]);
 [print(e["side"], e["pointer"]) for e in t["evidence"]]'
 ```
 
