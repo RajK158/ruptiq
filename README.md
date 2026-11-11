@@ -77,6 +77,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
 | Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses, and run once live against `demo/regression-lab` (heavy CPU, then a manual restart in light CPU). One observed improvement is not a cause |
+| Guided workflow integration test in CI (`scripts/guided-workflow-smoke-test.sh`) | Added. GitHub-hosted Ubuntu runs real k6 v2.3.0 and a loopback regression lab through `ruptiq-pair`. This job has not been observed on GitHub yet |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -2989,6 +2990,24 @@ experiment-to-analysis-to-investigation chain. The before/after comparison is te
 analyses and against that same saved analysis used as both inputs. The regression lab's tests hit its own handler only;
 they do not run k6.
 
+`scripts/guided-workflow-smoke-test.sh` is separate from those unit tests. On a Linux
+machine with Go, python3, curl, and k6 v2.3.0 it builds `ruptiq-pair` and
+`demo/regression-lab`, serves the lab on loopback, and runs a short before/after/compare
+workflow. The script stops the heavy lab and starts a light lab between the stages, which
+is the manual change boundary: Ruptiq does not edit the lab. It checks experiment status,
+telemetry completeness, CPU-mode gauges, analysis SHA-256 values, evidence pointers, and
+that a second compare does not overwrite the saved comparison. An early during-workload
+scrape may still show baseline mode, because the lab switches on the first GET /work.
+The heavy run must then stay degraded at 11233031 iterations, and the light run must
+stay at baseline 157135 iterations. It does not require a
+particular request rate, latency, or comparison outcome. A passing run is evidence that
+the workflow executed and the saved JSON is consistent. It is not a performance benchmark
+and it does not replace the Windows Task 12A measurements. Reproduce it with
+`bash scripts/guided-workflow-smoke-test.sh`. `bash scripts/guided-workflow-smoke-test.sh self-check`
+checks owned-process cleanup and the CPU-mode rules on synthetic samples. The GitHub Actions job
+`Guided workflow integration` runs the same script. It does not use Docker, and it does
+not upload the generated reports.
+
 `go test -race` turns on Go's race detector, which needs cgo and a 64-bit C compiler. The
 GitHub Actions workflow runs it on Linux, where it passes. The development machine (Windows) has only a 32-bit
 MinGW compiler, so the race detector cannot run there; run the plain `go test ./...` locally. The
@@ -3061,6 +3080,7 @@ demo/checkout/payment-service/           Demo target (NOT Ruptiq Core): Payment 
 demo/checkout/Dockerfile                 One multi-stage image definition for the three services
 compose.yaml                             Runs the three checkout services together (Docker Compose)
 scripts/checkout-smoke-test.sh           End-to-end checkout test over HTTP (used by CI)
+scripts/guided-workflow-smoke-test.sh    Real k6 and loopback regression-lab pair workflow (used by CI)
 .dockerignore                            Allow-list for Docker build contexts
 docs/                                    Design documents
 ```

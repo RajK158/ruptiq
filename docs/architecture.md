@@ -1138,6 +1138,26 @@ match the files. A second compare refused to overwrite the saved result. The com
 split between k6 client figures and server-side measurements are in README.md. This is one
 fixture pair, not a benchmark, not a repeated result, and not a significance test.
 
+### Guided workflow integration test
+
+`.github/workflows/ci.yml` adds a job named `Guided workflow integration`. It is
+independent of `go test` and of the Docker checkout job. On GitHub-hosted Ubuntu it
+installs pinned k6 v2.3.0, builds the existing regression lab and `ruptiq-pair`, and
+runs `scripts/guided-workflow-smoke-test.sh`. The lab listens on loopback only. The
+script stops the heavy process and starts a light one between the before and after
+stages, so the manual-change boundary stays outside Ruptiq. The checks cover a
+completed baseline, a rejected duration mismatch, a completed candidate, an offline
+compare, analysis SHA-256 provenance, evidence pointers into the matching analysis
+file, and a refused second compare. An early during-workload scrape may still show
+baseline mode, because the lab switches on the first GET /work. The heavy run must
+then stay degraded at 11233031 iterations. The light run must stay at baseline
+157135 iterations. Thresholds stay at their defaults. The job does
+not require `improvement_observed` or any exact throughput or latency, so a real
+difference in measured performance does not by itself fail the run. That makes it a
+workflow smoke test, not a benchmark, and it does not change the Task 12A measurements.
+The job has not been observed on GitHub yet. A compatible Linux machine can run
+`bash scripts/guided-workflow-smoke-test.sh` after Go and k6 v2.3.0 are installed.
+
 ## Fix validation: before and after
 
 `internal/fixvalidation` compares two saved analyses. The command is `ruptiq-validate-fix`. It is
@@ -1851,7 +1871,8 @@ checkout works across the three containers.
 - `cmd/ruptiq-pair`, `internal/pairworkflow`: three explicit invocations that capture a baseline
   diagnosis, stop for a change applied outside Ruptiq, capture a candidate, and compare the two
   saved diagnoses through `runvalidation.Run`. Unit tested with fake runners and synthetic
-  diagnoses, and run once live against the regression lab. One observed improvement is not a cause.
+  diagnoses, and run once live against the regression lab. CI runs the same CLI against
+  real k6 and a loopback lab; that job has not been observed on GitHub yet. One observed improvement is not a cause.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
   timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline
   and a two-run before/after comparison.
