@@ -32,6 +32,8 @@ and SHA-256 hashes tie the comparison back to the analysis files that were judge
 A first local walk-through, with Windows and Linux or macOS commands, is
 [Ruptiq — Guided Performance Regression Demo](docs/demo.md). The long status table below
 is the detailed record. [docs/architecture.md](docs/architecture.md) is the design.
+[Release readiness and limitations](docs/release-readiness.md) records what is verified
+before an official release.
 
 What exists today includes one HTTP GET workload through an external k6 process, periodic
 Prometheus sampling, offline rates and latency estimates, a single-run investigator that
