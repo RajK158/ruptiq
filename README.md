@@ -43,12 +43,14 @@ unsigned CLI archives.
 
 What it does not do: apply a code fix, name a proven root cause, use an AI diagnosis,
 or run a statistical significance test. There is no GUI, hosted dashboard, or run database.
-k6 is installed separately. Development CLI archives are unsigned. This repository has no
-license file.
+k6 is installed separately. Development CLI archives are unsigned.
+Ruptiq is licensed under the [MIT License](LICENSE).
 
 ## Install Ruptiq CLI
 
-Prebuilt development archives contain `ruptiq-pair`, `ruptiq-diagnose`, and `ruptiq-validate-runs`.
+Prebuilt development archives contain `ruptiq-pair`, `ruptiq-diagnose`, `ruptiq-validate-runs`,
+and `LICENSE`, the MIT License for this project. That file does not state the terms of
+third-party dependencies.
 The `CLI distribution builds` job uploads them as a temporary GitHub Actions artifact named
 `ruptiq-cli-development`. Downloading that artifact gives a zip of the five platform archives
 and `ruptiq-cli-SHA256SUMS.txt`. It is not a GitHub Release, not a Git tag, and not a signed

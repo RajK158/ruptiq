@@ -25,6 +25,9 @@ const ChecksumFile = "ruptiq-cli-SHA256SUMS.txt"
 // ReadmeName is the short usage note stored in every archive.
 const ReadmeName = "README.md"
 
+// LicenseName is the project license stored at the archive root.
+const LicenseName = "LICENSE"
+
 // Command is one program copied into every archive.
 type Command struct {
 	Name       string
@@ -76,7 +79,7 @@ func (p Platform) Executable(command string) string {
 
 // Contents are the root entries of p's archive, in archive order.
 func (p Platform) Contents() []string {
-	names := []string{ReadmeName}
+	names := []string{ReadmeName, LicenseName}
 	for _, command := range Commands {
 		names = append(names, p.Executable(command.Name))
 	}
@@ -101,6 +104,10 @@ func Run(ctx context.Context, moduleRoot, outDir string) ([]Result, error) {
 	if err := removeOwnedOutputs(outDir); err != nil {
 		return nil, err
 	}
+	license, err := readProjectLicense(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
 	staging, err := os.MkdirTemp("", "ruptiq-cli-stage-")
 	if err != nil {
 		return nil, err
@@ -116,6 +123,9 @@ func Run(ctx context.Context, moduleRoot, outDir string) ([]Result, error) {
 		}
 		readme := []byte(readmeText(platform))
 		if err := os.WriteFile(filepath.Join(dir, ReadmeName), readme, 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, LicenseName), license, 0o644); err != nil {
 			return nil, err
 		}
 		for _, command := range Commands {
@@ -246,9 +256,9 @@ func PackDirectory(dir, dest string, platform Platform) error {
 		if err != nil {
 			return fmt.Errorf("missing %s for %s: %w", name, platform.ArchiveName(), err)
 		}
-		mode := int64(0o644)
-		if name != ReadmeName {
-			mode = 0o755
+		mode := int64(0o755)
+		if name == ReadmeName || name == LicenseName {
+			mode = 0o644
 		}
 		entries = append(entries, Entry{Name: name, Body: body, Mode: mode})
 	}
@@ -333,6 +343,20 @@ func fileSHA256(path string) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
 }
 
+// readProjectLicense returns the exact bytes of the repository LICENSE.
+// A missing or unreadable file is an error. Packaging does not invent a license.
+func readProjectLicense(moduleRoot string) ([]byte, error) {
+	path := filepath.Join(moduleRoot, LicenseName)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("%s is empty", path)
+	}
+	return body, nil
+}
+
 func readmeText(p Platform) string {
 	exe := ""
 	if p.GOOS == "windows" {
@@ -341,7 +365,8 @@ func readmeText(p Platform) string {
 	return fmt.Sprintf(`# Ruptiq CLI (%s/%s)
 
 This is an unsigned development build, not a versioned or signed release.
-The repository has no license file, so this archive does not add one.
+Ruptiq is licensed under the MIT License. The full text is included in this archive as LICENSE.
+That text is the license for this project. It does not state the terms of third-party dependencies.
 
 The executables are ruptiq-pair%s, ruptiq-diagnose%s, and ruptiq-validate-runs%s.
 Go is not required to run them. k6 is not included.
