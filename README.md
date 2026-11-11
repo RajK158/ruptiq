@@ -43,7 +43,9 @@ sampling a Prometheus endpoint and saves both in one report; `ruptiq-analyze`, w
 calculates server-side throughput, 5xx rates, and estimated latency percentiles from a saved
 experiment report, offline; `ruptiq-investigate`, which ranks evidence-backed findings
 (observations and hypotheses to test, not root causes) from a saved analysis, offline; and
-`ruptiq-diagnose`, which runs that experiment, analysis, and investigation as one command.
+`ruptiq-diagnose`, which runs that experiment, analysis, and investigation as one command, and
+`ruptiq-pair`, which captures a baseline, stops for a change the developer applies outside
+Ruptiq, captures a candidate, and compares the two saved diagnoses.
 The checkout demo has three
 services: the Order Service, the Inventory Service, and the Payment Service. The Order Service
 reserves stock by calling the Inventory Service over HTTP, then takes a simulated payment by calling
@@ -74,6 +76,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | One-command diagnosis (`ruptiq-diagnose`) | Done as orchestration of the existing experiment, analysis, and investigation. Unit tested with fake runners and readers, and run once against `demo/regression-lab` (see below). A completed run is not a performance finding. Abstention is not a failure. Comparing two saved runs is a separate command |
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
+| Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses. One observed improvement is not a cause |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -1376,7 +1379,8 @@ before another workload, and the four files were byte-for-byte unchanged.
 - The regression-lab run above is one controlled CPU change on one machine. It does not show that
   the same numbers would recur, and it is not a comparison between two software versions.
   `ruptiq-validate-fix` is still the command for two analysis files. `ruptiq-validate-runs` is the
-  command for two diagnosis directories. Unit tests do not start k6.
+  command for two diagnosis directories. `ruptiq-pair` is the guided three-step workflow around
+  those diagnoses. Unit tests do not start k6.
 
 ## Compare two saved diagnosis runs (`ruptiq-validate-runs`)
 
@@ -1458,6 +1462,92 @@ experiment, or manifests that point at the wrong files, are rejected and are not
 
 Reports stay in the output directory you choose. Keep that directory outside Git, as with the
 other generated reports under `tmp/`.
+
+## Guided before/after validation (`ruptiq-pair`)
+
+`ruptiq-pair` is three separate commands. Each one exits when it finishes. Ruptiq does not stay
+running, edit application code, restart a service, or deploy a candidate. The commands below are
+a runnable template. They are not a record of a live measurement.
+
+Capture the baseline, then stop:
+
+```sh
+go run ./cmd/ruptiq-pair -stage before -pair-dir tmp/my-validation -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 PATH_TO_K6 -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+The process prints that the baseline was captured and exits. Apply the change outside Ruptiq:
+edit the code or configuration, build or restart the service, and decide when it is ready.
+Ruptiq does not apply or verify that change.
+
+Capture the candidate with the same workload settings:
+
+```sh
+go run ./cmd/ruptiq-pair -stage after -pair-dir tmp/my-validation -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 PATH_TO_K6 -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+If the target, metrics endpoint, virtual users, duration, scrape interval, sampling limits,
+metric families, or metric labels differ from the baseline, the after stage stops before it
+starts a workload. URL user information and query strings are not stored. The pair manifest
+keeps a SHA-256 of each original URL as a consistency fingerprint. A redacted URL match with a
+different hash is rejected. That hash is not a secure substitute for protecting a short or
+guessable secret: someone who can guess the URL can test the guess against the hash. If
+`pair-manifest.json` is missing, the saved reports only have the redacted URLs. The after stage
+then refuses to start a workload, because a hash of the redacted text would not be the original
+URL. The baseline files stay in place. Compare still runs when `before/` and `after/` are
+already complete.
+
+Compare the two saved diagnoses. This invocation does not start k6:
+
+```sh
+go run ./cmd/ruptiq-pair -stage compare -pair-dir tmp/my-validation
+```
+
+The pair directory looks like this:
+
+| Path | What it is |
+| --- | --- |
+| `before/` | The baseline `ruptiq-diagnose` directory: `experiment.json`, `analysis.json`, `investigation.json`, `manifest.json`. |
+| `after/` | The candidate diagnosis, with the same file names. |
+| `comparison/validation.json` | The existing fix-validation report. Its outcome is the comparison. |
+| `comparison/manifest.json` | The run-validation manifest, including analysis SHA-256 values and warnings. |
+| `pair-manifest.json` | The workflow state. URLs in it are redacted. URL SHA-256 values are consistency fingerprints of the original strings. |
+
+`pair-manifest.json` uses `baseline_captured`, `candidate_captured`, or `comparison_completed`
+only when the corresponding files are a finished diagnosis or a finished comparison. A failed or
+partial stage is `failed` or `interrupted`, with a recovery note. A completed workflow is not
+the same thing as an observed improvement.
+
+A finished `comparison/` is reused only when `validation.json` is a successful fix-validation
+report, its outcome and comparability match `comparison/manifest.json`, and that manifest's
+analysis SHA-256 values match the current `before/analysis.json` and `after/analysis.json`.
+A corrupt report, an error report, a disagreement, or a comparison copied from another pair is
+not adopted and is not run again. Those files stay in place. Remove `comparison/` by hand and
+run `-stage compare` again to judge the current diagnoses. `pair-manifest.json` is replaced by
+renaming a complete temporary file onto it. The previous manifest is not deleted first. If that
+replacement fails, the previous manifest remains.
+
+The outcome words are the fix-validation outcomes, unchanged: `improvement_observed`,
+`regression_observed`, `mixed`, `no_material_change`, `insufficient_evidence`, and
+`not_comparable`. The last two are completed comparisons, not command failures. Evidence
+pointers in `comparison/validation.json` are JSON pointers into `before/analysis.json` or
+`after/analysis.json`, chosen by the pointer's `side`. They are not pointers into
+`validation.json`.
+
+To resume, run the stage you still need. Do not delete a completed `before/` or `after/` to
+retry a later stage. If a stage directory is partial, reserved, or failed, the command refuses
+to overwrite it and tells you which directory to remove by hand. A `.ruptiq-pair-reservation`
+file left by a crash is not deleted. Remove it only after you have confirmed that no
+`ruptiq-pair` process is running, then rerun that stage. A symlink or junction cannot point a
+stage directory at another stage or outside the pair directory.
+
+Exit status 0 means the stage finished. Exit status 2 is an invalid invocation, a configuration
+mismatch, a reservation, or a refusal to overwrite saved reports. Exit status 3 is a stage that
+failed or a manifest that could not be read or written. `go run` still prints `exit status N`
+and returns 1 to the shell when N is not 0.
+
+One pair does not show that a difference would recur, and it does not show that a code change
+caused it. `ruptiq-validate-runs` remains the command for two diagnosis directories you already
+have. `ruptiq-validate-fix` remains the command for two analysis files.
 
 ## Compare a baseline and a candidate (`ruptiq-validate-fix`)
 
@@ -2835,6 +2925,7 @@ cmd/ruptiq-analyze/                      Ruptiq Core: offline analysis command (
 cmd/ruptiq-investigate/                  Ruptiq Core: offline investigation command (flags, files, exit codes)
 cmd/ruptiq-validate-fix/                 Ruptiq Core: before/after analysis comparison (flags, files, exit codes)
 cmd/ruptiq-validate-runs/                Ruptiq Core: compare two saved diagnosis directories
+cmd/ruptiq-pair/                         Ruptiq Core: guided before, after, and compare workflow
 cmd/ruptiq-diagnose/                     Ruptiq Core: one-run diagnosis command (flags, exit codes, JSON files)
 internal/api/                            Ruptiq Core: HTTP server, routes, and handlers
 internal/workload/                       Ruptiq Core: workload spec, validation, results, pass/fail
@@ -2859,6 +2950,8 @@ internal/diagnosis/                      Ruptiq Core: one experiment, its analys
                                          investigation, with a versioned manifest
 internal/runvalidation/                  Ruptiq Core: checks two diagnosis directories and compares
                                          their analyses. Does not run a workload or apply a change
+internal/pairworkflow/                   Ruptiq Core: three-step before/after workflow. Calls
+                                         diagnosis and run validation. Does not apply a change
 demo/regression-lab/                     Validation fixture (NOT Ruptiq Core, not checkout): loopback
                                          HTTP target with real CPU work and Prometheus metrics
 demo/checkout/order-service/             Demo target (NOT Ruptiq Core): Order Service
