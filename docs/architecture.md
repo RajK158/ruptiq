@@ -1164,8 +1164,9 @@ following push to main. A compatible Linux machine can run
 `scripts/package-cli.go` cross-compiles `ruptiq-pair`, `ruptiq-diagnose`, and
 `ruptiq-validate-runs` with `CGO_ENABLED=0` and `-trimpath`. The targets are linux/amd64,
 linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64. Linux and macOS archives are
-`.tar.gz`. Windows is `.zip`. Each archive contains those three executables and a short
-README. The repository has no license file, so none is added. Source, experiments, k6, and
+`.tar.gz`. Windows is `.zip`. Each archive contains those three executables, a short
+README, and the project's MIT `LICENSE`. The MIT text does not state the terms of
+third-party dependencies. Source, experiments, k6, and
 Docker files are not included. `dist/ruptiq-cli-SHA256SUMS.txt` records a SHA-256 for every
 archive. The output directory is gitignored.
 

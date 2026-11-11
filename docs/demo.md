@@ -380,4 +380,4 @@ The design write-up is [docs/architecture.md](architecture.md).
 - k6 is an external program. This repository does not ship it.
 - The CLI archives are unsigned development builds. CI does not execute the Windows or macOS binaries.
 - Windows and macOS can build and, on a machine where the tools are installed, run the demo. The GitHub workflow that runs the demo path is Ubuntu.
-- The repository has no license file. This document does not grant one.
+- Ruptiq is licensed under the MIT License. The text is [LICENSE](../LICENSE). That file does not state the terms of third-party dependencies.

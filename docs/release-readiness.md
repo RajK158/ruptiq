@@ -12,6 +12,21 @@ GitHub metadata below was read from the public GitHub API on 11 November 2026.
 The four Actions checks are the check runs on that merge commit. This audit did
 not re-run the live performance experiment or the Go test suite.
 
+## Status update — 11 November 2026
+
+The sections below record the repository at `d1d124532efd60ada0e366b6d68a7820d0f72fb5`,
+when it had no license file. After that audit the owner selected the MIT License.
+
+- The owner selected MIT. The copyright line is `Copyright (c) 2026 RajK158`.
+- A root `LICENSE` file has been added. It is the standard MIT text.
+- CLI archives now include that file at the archive root with mode `0644`, beside
+  `README.md` and the three executables. The archive note says the project is
+  MIT-licensed and points at `LICENSE`.
+- The MIT text is the license for this project. It does not state the terms of
+  third-party dependencies. That review remains pending.
+- An official versioned release, retention beyond the seven-day Actions artifact,
+  and signing remain pending. Adding `LICENSE` does not publish a release.
+
 ## A. Current deliverables
 
 Implemented and covered by code, tests, or a recorded run:
@@ -177,8 +192,9 @@ Not covered by those jobs:
 
 ## F. Licensing and redistribution
 
-This is an owner decision. This document does not select a license and does not
-state a legal conclusion about third-party compliance.
+The bullets in this section describe the PR #21 merge, before a license file
+existed. The status update above records the later MIT selection. This section
+does not state a legal conclusion about third-party compliance.
 
 - The GitHub repository `RajK158/ruptiq` is public (`visibility: public`).
 - No `LICENSE` file is in the tree. The GitHub license API returned HTTP 404,
@@ -199,8 +215,9 @@ state a legal conclusion about third-party compliance.
 
 ### Required decision before an official public release
 
-- Choose the license or the explicit non-license terms, and put that text in
-  the repository before describing the project as open source or as redistributable.
+The project license is no longer an open choice. The status update records the
+MIT selection and the root `LICENSE` file. These decisions are still open:
+
 - Decide what an official release is. The current artifact is an unsigned,
   unversioned Actions upload kept for seven days. Publishing that upload as a
   release, or creating a tag and a GitHub Release, is a decision. This audit
@@ -236,8 +253,10 @@ blocker for a CLI whose README already says those things are absent.
 
 ## H. Release checklist
 
-Checked items have evidence in this commit, in the workflow file, or in the
-GitHub check runs for `d1d1245`. Unchecked items are open.
+Checked items from the PR #21 merge have evidence in `d1d1245`, the workflow
+file, or the GitHub check runs for that commit. The license item is checked
+because the owner later selected MIT and this change adds `LICENSE`. Unchecked
+items are still open. Third-party review and a versioned release are not resolved.
 
 - [x] Main contains PR #21 at `d1d124532efd60ada0e366b6d68a7820d0f72fb5`.
 - [x] `test`, `Docker checkout integration`, `Guided workflow integration`, and
@@ -248,7 +267,8 @@ GitHub check runs for `d1d1245`. Unchecked items are open.
 - [x] Development archive names, checksums, and the seven-day upload are
       implemented in `internal/clidist` and `.github/workflows/ci.yml`.
 - [x] The repository is public and has no GitHub Releases.
-- [ ] Owner records a license or an explicit decision not to grant one.
+- [x] Owner selected the MIT License on 11 November 2026. Root `LICENSE` is
+      added in this change. The `d1d1245` tree recorded above had no license file.
 - [ ] Owner reviews third-party module licenses before redistribution.
 - [ ] Owner decides whether to create a versioned, retained release, and whether
       the binaries will be signed.

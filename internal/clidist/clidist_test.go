@@ -37,11 +37,15 @@ func TestArchiveNames(t *testing.T) {
 
 func TestExecutableNames(t *testing.T) {
 	linux := Platform{GOOS: "linux", GOARCH: "amd64"}.Contents()
+	darwin := Platform{GOOS: "darwin", GOARCH: "arm64"}.Contents()
 	windows := Platform{GOOS: "windows", GOARCH: "amd64"}.Contents()
-	if stringsJoin(linux) != "README.md ruptiq-pair ruptiq-diagnose ruptiq-validate-runs" {
+	if stringsJoin(linux) != "README.md LICENSE ruptiq-pair ruptiq-diagnose ruptiq-validate-runs" {
 		t.Fatalf("linux contents %v", linux)
 	}
-	if stringsJoin(windows) != "README.md ruptiq-pair.exe ruptiq-diagnose.exe ruptiq-validate-runs.exe" {
+	if stringsJoin(darwin) != stringsJoin(linux) {
+		t.Fatalf("darwin contents %v", darwin)
+	}
+	if stringsJoin(windows) != "README.md LICENSE ruptiq-pair.exe ruptiq-diagnose.exe ruptiq-validate-runs.exe" {
 		t.Fatalf("windows contents %v", windows)
 	}
 }
@@ -81,7 +85,7 @@ func TestPackOmitsUnrelatedAndRejectsMissing(t *testing.T) {
 		t.Fatalf("tar.gz magic %x", magic)
 	}
 	modes := archiveModes(t, dest)
-	if modes["README.md"] != 0o644 || modes["ruptiq-pair"] != 0o755 || modes["ruptiq-diagnose"] != 0o755 || modes["ruptiq-validate-runs"] != 0o755 {
+	if modes["README.md"] != 0o644 || modes["LICENSE"] != 0o644 || modes["ruptiq-pair"] != 0o755 || modes["ruptiq-diagnose"] != 0o755 || modes["ruptiq-validate-runs"] != 0o755 {
 		t.Fatalf("tar modes %v", modes)
 	}
 
@@ -109,6 +113,24 @@ func TestPackOmitsUnrelatedAndRejectsMissing(t *testing.T) {
 	}
 	if string(body) != "zip" {
 		t.Fatalf("zip entry %q", body)
+	}
+	zipModes := zipFileModes(t, zipDest)
+	if zipModes["LICENSE"] != 0o644 || zipModes["ruptiq-pair.exe"] != 0o755 {
+		t.Fatalf("zip modes %v", zipModes)
+	}
+
+	if err := os.Remove(filepath.Join(dir, "LICENSE")); err != nil {
+		t.Fatal(err)
+	}
+	missingLicense := filepath.Join(t.TempDir(), "missing-license.tar.gz")
+	if err := PackDirectory(dir, missingLicense, platform); err == nil {
+		t.Fatal("missing LICENSE was packaged")
+	}
+	if _, err := os.Stat(missingLicense); !os.IsNotExist(err) {
+		t.Fatalf("partial archive exists: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "LICENSE"), []byte("LICENSE"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := os.Remove(filepath.Join(dir, "ruptiq-pair")); err != nil {
@@ -234,6 +256,79 @@ func TestIdentifyHeaders(t *testing.T) {
 	}
 }
 
+func TestProjectLicenseBytes(t *testing.T) {
+	license := []byte("Copyright (c) 2026 RajK158\nMIT License\n")
+	for _, platform := range []Platform{
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "darwin", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "amd64"},
+	} {
+		dir := t.TempDir()
+		for _, name := range platform.Contents() {
+			body := []byte(name)
+			mode := os.FileMode(0o755)
+			if name == LicenseName {
+				body = license
+				mode = 0o644
+			}
+			if name == ReadmeName {
+				mode = 0o644
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), body, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dest := filepath.Join(t.TempDir(), platform.ArchiveName())
+		if err := PackDirectory(dir, dest, platform); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadArchiveFile(dest, LicenseName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, license) {
+			t.Fatalf("%s LICENSE bytes differ", platform.ArchiveName())
+		}
+	}
+}
+
+func TestReadProjectLicense(t *testing.T) {
+	root := t.TempDir()
+	if _, err := readProjectLicense(root); err == nil {
+		t.Fatal("missing LICENSE was accepted")
+	}
+	if err := os.Mkdir(filepath.Join(root, LicenseName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readProjectLicense(root); err == nil {
+		t.Fatal("unreadable LICENSE was accepted")
+	}
+	if err := os.Remove(filepath.Join(root, LicenseName)); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("Copyright (c) 2026 RajK158\n")
+	if err := os.WriteFile(filepath.Join(root, LicenseName), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readProjectLicense(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("license bytes %q", got)
+	}
+	text := readmeText(Platform{GOOS: "linux", GOARCH: "amd64"})
+	if bytes.Contains([]byte(text), []byte("no license")) {
+		t.Fatal("archive README still says the repository has no license")
+	}
+	if !bytes.Contains([]byte(text), []byte("MIT License")) || !bytes.Contains([]byte(text), []byte("LICENSE")) {
+		t.Fatal("archive README does not name the included MIT license")
+	}
+	if bytes.Contains([]byte(text), []byte("third-party dependencies are MIT")) {
+		t.Fatal("archive README claims third-party dependencies are MIT")
+	}
+}
+
 func archiveModes(t *testing.T, path string) map[string]int64 {
 	t.Helper()
 	f, err := os.Open(path)
@@ -257,6 +352,20 @@ func archiveModes(t *testing.T, path string) map[string]int64 {
 			t.Fatal(err)
 		}
 		modes[hdr.Name] = hdr.Mode
+	}
+	return modes
+}
+
+func zipFileModes(t *testing.T, path string) map[string]int64 {
+	t.Helper()
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	modes := map[string]int64{}
+	for _, file := range r.File {
+		modes[file.Name] = int64(file.Mode().Perm())
 	}
 	return modes
 }
