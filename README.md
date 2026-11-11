@@ -2,9 +2,47 @@
 
 **Find the breaking point. Fix the bottleneck.**
 
-Ruptiq is an intelligent performance testing platform for distributed systems. The goal is to
-push a system under test until it breaks, then help engineers understand *why* it broke and
-what to fix first.
+Ruptiq is a performance testing platform for distributed systems. It runs a workload
+against a target, records the target's telemetry, and compares a saved baseline with a
+later run so an engineer can see where the measurements moved.
+
+## Start here
+
+Ruptiq runs a short workload, records the target's telemetry, and compares a saved baseline
+with a later saved run. It is for a developer who changes a service outside Ruptiq and wants
+the before and after measurements kept, checked, and compared. It does not edit the service,
+restart it, or decide that a code change caused the difference.
+
+The guided workflow is three separate commands. Each one exits when it finishes.
+
+```mermaid
+flowchart LR
+  you1["You start the service"] --> before["ruptiq-pair before"]
+  before --> you2["You change the service"]
+  you2 --> after["ruptiq-pair after"]
+  after --> you3["You stop the service"]
+  you3 --> compare["ruptiq-pair compare"]
+```
+
+`before` and `after` start k6 against a URL and scrape a Prometheus endpoint on an interval.
+`compare` reads the two saved diagnosis directories. It does not start k6. Analysis,
+investigation, and the before/after judgment run offline on those files. Evidence pointers
+and SHA-256 hashes tie the comparison back to the analysis files that were judged.
+
+A first local walk-through, with Windows and Linux or macOS commands, is
+[Ruptiq — Guided Performance Regression Demo](docs/demo.md). The long status table below
+is the detailed record. [docs/architecture.md](docs/architecture.md) is the design.
+
+What exists today includes one HTTP GET workload through an external k6 process, periodic
+Prometheus sampling, offline rates and latency estimates, a single-run investigator that
+can abstain, a guided before/after workflow, a loopback regression lab, a three-service
+checkout demo, and CI for Go tests, the checkout containers, the guided workflow, and
+unsigned CLI archives.
+
+What it does not do: apply a code fix, name a proven root cause, use an AI diagnosis,
+or run a statistical significance test. There is no GUI, hosted dashboard, or run database.
+k6 is installed separately. Development CLI archives are unsigned. This repository has no
+license file.
 
 ## Install Ruptiq CLI
 
@@ -112,7 +150,7 @@ between those stages.
 
 ## MVP scope
 
-The first usable version is planned to cover:
+The first usable version covers these four areas. Each line says how far that area has gone:
 
 1. Running a load workload against a target and recording the run.
 2. Reading telemetry from the target while the workload runs.
@@ -174,8 +212,8 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
 | Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses, and run once live against `demo/regression-lab` (heavy CPU, then a manual restart in light CPU). One observed improvement is not a cause |
-| Guided workflow integration test in CI (`scripts/guided-workflow-smoke-test.sh`) | Added. GitHub-hosted Ubuntu runs real k6 v2.3.0 and a loopback regression lab through `ruptiq-pair`. This job has not been observed on GitHub yet |
-| CLI distribution archives (`ruptiq-pair`, `ruptiq-diagnose`, `ruptiq-validate-runs`) | Added. CI cross-compiles linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64. The archives are unsigned development artifacts, not a release. This job has not been observed on GitHub yet |
+| Guided workflow integration test in CI (`scripts/guided-workflow-smoke-test.sh`) | Passing on GitHub Actions for the pull request that added it and for the following push to main. GitHub-hosted Ubuntu runs real k6 v2.3.0 and a loopback regression lab through `ruptiq-pair`. The job checks workflow execution, not a performance number |
+| CLI distribution archives (`ruptiq-pair`, `ruptiq-diagnose`, `ruptiq-validate-runs`) | Passing on GitHub Actions for the pull request that added it and for the following push to main. CI cross-compiles linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64, executes the Linux AMD64 binaries, and checks the other platforms by file format. The archives are unsigned development artifacts, not a release |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -3182,4 +3220,5 @@ scripts/guided-workflow-smoke-test.sh    Real k6 and loopback regression-lab pai
 scripts/package-cli.go                   Builds development CLI archives into dist/ (used by CI)
 .dockerignore                            Allow-list for Docker build contexts
 docs/                                    Design documents
+docs/demo.md                             Local guided-workflow demonstration
 ```
