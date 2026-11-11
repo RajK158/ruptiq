@@ -1120,6 +1120,24 @@ improvement. One pair is not a cause and not a statistical significance test.
 
 Tests use a fake runner and reader, or synthetic diagnosis directories. They do not start k6.
 
+### Task 12A — Live Guided Before/After Validation
+
+One live workflow on this Windows machine (Go 1.27.3, k6 v2.3.0, commit `a5332f0`,
+`2026-11-11T00:09:50Z`) used `demo/regression-lab` and real k6. The baseline lab used
+`-degrade-after 0s` (157135 baseline iterations, 11233031 degraded). After that diagnosis
+finished, the lab process was stopped. Windows recorded `exit status 0xffffffff`. That is the
+termination status, not a failed workload: the saved experiment status is `passed`. A new
+process with `-degrade-after 1h` and the same iteration counts was started by hand, and it was
+stopped the same way after the candidate diagnosis. Ruptiq did not edit the lab or the
+diagnosis settings. Eligible `GET /work` windows compared as 141.2 → 3979.7 requests/s
+(+2719.3%, stored relative change 27.19322250211689) and median window p95 24.250 ms → 0.938 ms
+(−96.1%, stored relative change −0.9613211149293623), 5xx ratio 0 on both sides. The outcome
+was `improvement_observed` and the runs were comparable. Each diagnosis investigation was
+`no_material_change` because that run stayed in one CPU mode. The saved analysis SHA-256 values
+match the files. A second compare refused to overwrite the saved result. The commands and the
+split between k6 client figures and server-side measurements are in README.md. This is one
+fixture pair, not a benchmark, not a repeated result, and not a significance test.
+
 ## Fix validation: before and after
 
 `internal/fixvalidation` compares two saved analyses. The command is `ruptiq-validate-fix`. It is
@@ -1833,7 +1851,7 @@ checkout works across the three containers.
 - `cmd/ruptiq-pair`, `internal/pairworkflow`: three explicit invocations that capture a baseline
   diagnosis, stop for a change applied outside Ruptiq, capture a candidate, and compare the two
   saved diagnoses through `runvalidation.Run`. Unit tested with fake runners and synthetic
-  diagnoses. One observed improvement is not a cause.
+  diagnoses, and run once live against the regression lab. One observed improvement is not a cause.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
   timed baseline→degraded switch, used to validate the experiment/analysis/investigation pipeline
   and a two-run before/after comparison.

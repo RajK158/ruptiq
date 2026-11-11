@@ -76,7 +76,7 @@ the Payment Service over HTTP. The Inventory Service exposes Prometheus metrics 
 | One-command diagnosis (`ruptiq-diagnose`) | Done as orchestration of the existing experiment, analysis, and investigation. Unit tested with fake runners and readers, and run once against `demo/regression-lab` (see below). A completed run is not a performance finding. Abstention is not a failure. Comparing two saved runs is a separate command |
 | Before/after comparison of two saved analyses (`ruptiq-validate-fix`) | Done for server throughput, 5xx ratio, and median per-window p95; deterministic and unit tested offline, including the synthetic inventory analysis, and run on two live regression-lab pairs (slow then fast, then fast then slow). An observed difference is not a cause, not a software patch, and not a statistical result. Reports stay in gitignored `tmp/` |
 | Comparison of two saved diagnosis directories (`ruptiq-validate-runs`) | Done as offline orchestration: it checks two `ruptiq-diagnose` directories and calls `fixvalidation.Compare`. It does not run either experiment or apply a change. Unit tested with synthetic diagnosis directories. A completed comparison is not proof of a fix |
-| Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses. One observed improvement is not a cause |
+| Guided before/after workflow (`ruptiq-pair`) | Done as three separate invocations: `before`, `after`, and `compare`. The process exits after the baseline. The developer changes the service outside Ruptiq. Compare calls `runvalidation.Run`. Unit tested with fake runners and synthetic diagnoses, and run once live against `demo/regression-lab` (heavy CPU, then a manual restart in light CPU). One observed improvement is not a cause |
 | Controlled regression lab (`demo/regression-lab`) | Done as a loopback-only validation fixture (real CPU work, Prometheus metrics, baseline→degraded switch). Unit tested without k6. One live pipeline run is recorded in README.md; generated reports are not in Git |
 | Cancellation, compensation, reservation release | Not started |
 | Telemetry for the Order and Payment Services | Not started |
@@ -1467,7 +1467,8 @@ other generated reports under `tmp/`.
 
 `ruptiq-pair` is three separate commands. Each one exits when it finishes. Ruptiq does not stay
 running, edit application code, restart a service, or deploy a candidate. The commands below are
-a runnable template. They are not a record of a live measurement.
+a runnable template. One live run, with its own commands and measured results, is recorded under
+Task 12A below.
 
 Capture the baseline, then stop:
 
@@ -1548,6 +1549,92 @@ and returns 1 to the shell when N is not 0.
 One pair does not show that a difference would recur, and it does not show that a code change
 caused it. `ruptiq-validate-runs` remains the command for two diagnosis directories you already
 have. `ruptiq-validate-fix` remains the command for two analysis files.
+
+### Task 12A — Live Guided Before/After Validation
+
+One development machine, Windows, Go 1.27.3, portable k6 v2.3.0, commit `a5332f0`. The run
+started at `2026-11-11T00:09:50Z`. Reports stayed in gitignored `tmp/live-guided-pair-12a`.
+Nothing in the comparison thresholds or the saved JSON was edited afterward. These numbers are
+what this machine measured. They are not a production benchmark and not a statistical result.
+
+The lab was a separate process. Ruptiq did not edit it. The heavier baseline was:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 0s -baseline-iters 157135 -degraded-iters 11233031
+```
+
+`GET /healthz` returned `{"status":"ok","service":"regression-lab"}` before the workload. Then:
+
+```sh
+go run ./cmd/ruptiq-pair -stage before -pair-dir tmp/live-guided-pair-12a -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+The command exited 0, printed `baseline_captured`, and did not create `after/` or `comparison/`.
+`before/` has `experiment.json`, `analysis.json`, `investigation.json`, and `manifest.json`.
+
+That lab process was stopped after the baseline diagnosis had finished (`experiment.json` status `passed`, workload `finished_at` `2026-11-11T00:10:10.6428972Z`). Windows recorded `exit status 0xffffffff` for that stop. That nonzero status is the process termination, not a failed k6 run. Port 8090 was then free. A new process was started with the same
+iteration counts and `-degrade-after 1h`. That is a fixture configuration change made outside
+Ruptiq, not a code fix applied by Ruptiq. The diagnosis flags were not changed:
+
+```sh
+go run ./demo/regression-lab -addr 127.0.0.1:8090 -degrade-after 1h -baseline-iters 157135 -degraded-iters 11233031
+go run ./cmd/ruptiq-pair -stage after -pair-dir tmp/live-guided-pair-12a -url http://127.0.0.1:8090/work -metrics-url http://127.0.0.1:8090/metrics -vus 2 -duration 20s -interval 1s -k6 tmp/k6/k6-v2.3.0-windows-amd64/k6.exe -requests-metric regression_lab_http_requests_total -duration-metric regression_lab_http_request_duration_seconds
+```
+
+The fingerprint gate accepted the repeated settings and the second workload ran. The command
+exited 0 with `candidate_captured`. The four `before/` files were byte-for-byte unchanged
+(analysis SHA-256 `21e0ecded4ee26437d52c16e52e9ddeb5beb97972f190097e29d09189db25a00`). The
+lighter lab was then stopped the same way, after its diagnosis had finished (`finished_at` `2026-11-11T00:12:51.088745Z`, status `passed`). Its Windows status was also `exit status 0xffffffff`. Compare did not contact it:
+
+```sh
+go run ./cmd/ruptiq-pair -stage compare -pair-dir tmp/live-guided-pair-12a
+```
+
+Compare exited 0. `pair-manifest.json` is `comparison_completed`. `comparison/validation.json`
+and `comparison/manifest.json` both say `improvement_observed` and comparable. The analysis
+hashes are `21e0ecded4ee26437d52c16e52e9ddeb5beb97972f190097e29d09189db25a00` and
+`d64b06a524b7eedc742ed141e0d312ae7b63f7942e2e7bf45b7355c5f9bbcd64`.
+
+| | Heavier CPU (`-degrade-after 0s`) | Lighter CPU (`-degrade-after 1h`) |
+| --- | --- | --- |
+| k6 (client) | 2830 requests, 141.5 req/s, 0 failed, avg 13.989 ms, p95 15.444 ms, max 156.562 ms, 20.005s | 77695 requests, 3884.7 req/s, 0 failed, avg 0.448 ms, p50 0.534 ms, p95 0.686 ms, max 33.657 ms, 20.000s |
+| Prometheus | 22 of 22 scrapes (1 before, 20 during, 1 after) | 22 of 22 scrapes (1 before, 20 during, 1 after) |
+| `regression_lab_degraded` | 0 on sample #1; 1 on samples #2–#22 | 0 on all 22 samples |
+| `regression_lab_work_iterations` | 157135 on sample #1; 11233031 on samples #2–#22 | 157135 on all 22 samples |
+| Server, all analysis windows, `GET /work` | 2830 requests in 20.201s (140.1 req/s), 0 of 2830 5xx | 77695 requests in 20.126s (3860.5 req/s), 0 of 77695 5xx |
+
+Both diagnoses passed, with complete telemetry. Each investigation outcome is
+`no_material_change`: within one run the load stayed in one CPU mode, so the single-run
+investigator had no earlier-versus-later change to rank. That is not the before/after
+comparison.
+
+`compare` kept the default thresholds. Each side had 21 windows and 19 eligible windows (2–20).
+Windows 1 and 21 span the workload boundary and were excluded. For eligible `GET /work` windows:
+
+| Signal | Before (heavier) | After (lighter) | Result |
+| --- | --- | --- | --- |
+| Throughput | 2682 requests / 19.0000s = 141.2 req/s | 75611 requests / 18.9992s = 3979.7 req/s | +2719.3%, improvement |
+| 5xx ratio | 0.00% (0 of 2682) | 0.00% (0 of 75611) | no material change |
+| Median window p95 | 24.250 ms, bucket union 10 ms–50 ms | 0.938 ms, bucket union 0.500 ms–1.000 ms | −96.1%, improvement |
+
+The outcome was `improvement_observed`. Ranked server-side changes, regressions first:
+
+1. `GET /work` throughput, improvement, +2719.3%.
+2. `GET /work` p95, improvement, −96.1%.
+
+The runs were comparable. The only comparability warning is that the k6 client results differ;
+those client figures are not the server-side conclusion. `GET /healthz` had no requests
+(`no_material_change` throughput, undefined 5xx ratio, and insufficient latency evidence).
+
+All 190 evidence pointers in `validation.json` resolved in the analysis file named by `side`.
+The first `GET /work` throughput pointer is `/analysis/windows/1/routes/1/requests` (105
+requests in the heavier file, analysis window 2). The first p95 pointer is
+`/analysis/windows/1/routes/1/latency/p95` (0.03125 s, bucket 25–50 ms).
+
+A second `compare` on the same directory exited with status 2 and did not overwrite the
+completed comparison. No `.ruptiq-pair-reservation`, diagnosis reservation, or run-validation
+reservation remained. No lab process was left listening on port 8090. The saved metadata has
+no URL user information and no query string.
 
 ## Compare a baseline and a candidate (`ruptiq-validate-fix`)
 
