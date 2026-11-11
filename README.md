@@ -14,10 +14,18 @@ The `CLI distribution builds` job uploads them as a temporary GitHub Actions art
 and `ruptiq-cli-SHA256SUMS.txt`. It is not a GitHub Release, not a Git tag, and not a signed
 build. Running these binaries does not require Go.
 
-Unzip the artifact, then check the checksums from that directory. On Linux and macOS:
+Unzip the artifact, then check the checksums from that directory.
+
+Linux:
 
 ```sh
 sha256sum -c ruptiq-cli-SHA256SUMS.txt
+```
+
+macOS:
+
+```sh
+shasum -a 256 -c ruptiq-cli-SHA256SUMS.txt
 ```
 
 On Windows PowerShell, compare one archive with its line in the checksum file:
