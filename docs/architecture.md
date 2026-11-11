@@ -1155,7 +1155,8 @@ then stay degraded at 11233031 iterations. The light run must stay at baseline
 not require `improvement_observed` or any exact throughput or latency, so a real
 difference in measured performance does not by itself fail the run. That makes it a
 workflow smoke test, not a benchmark, and it does not change the Task 12A measurements.
-The job has not been observed on GitHub yet. A compatible Linux machine can run
+The job has passed on GitHub Actions for the pull request that added it and for the
+following push to main. A compatible Linux machine can run
 `bash scripts/guided-workflow-smoke-test.sh` after Go and k6 v2.3.0 are installed.
 
 ### CLI distribution builds
@@ -1175,8 +1176,8 @@ arm64. It does not execute Windows or macOS binaries, so a passing job does not 
 those operating systems will start the files. The archives are uploaded as the temporary
 artifact `ruptiq-cli-development` for seven days. That artifact is not a GitHub Release and
 not a signed build. Live before, after, and diagnose commands still need a separately
-installed k6. Compare and `ruptiq-validate-runs` do not. This job has not been observed on
-GitHub yet.
+installed k6. Compare and `ruptiq-validate-runs` do not. This job has passed on GitHub
+Actions for the pull request that added it and for the following push to main.
 
 ## Fix validation: before and after
 
@@ -1892,7 +1893,8 @@ checkout works across the three containers.
   diagnosis, stop for a change applied outside Ruptiq, capture a candidate, and compare the two
   saved diagnoses through `runvalidation.Run`. Unit tested with fake runners and synthetic
   diagnoses, and run once live against the regression lab. CI runs the same CLI against
-  real k6 and a loopback lab; that job has not been observed on GitHub yet. One observed improvement is not a cause.
+  real k6 and a loopback lab. That CI job has passed on GitHub Actions for the pull request
+  that added it and for the following push to main. One observed improvement is not a cause.
   Development archives of this command, `ruptiq-diagnose`, and `ruptiq-validate-runs` are built
   by `scripts/package-cli.go`. They are unsigned and are not a release.
 - `demo/regression-lab`: loopback HTTP fixture with real CPU work, Prometheus HTTP metrics, and a
