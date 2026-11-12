@@ -27,6 +27,24 @@ when it had no license file. After that audit the owner selected the MIT License
 - An official versioned release, retention beyond the seven-day Actions artifact,
   and signing remain pending. Adding `LICENSE` does not publish a release.
 
+## Status update — 11 November 2026, third-party licenses
+
+The MIT update above left third-party review pending. License files for the
+modules this repository imports have now been read. The notes are in
+[docs/third-party-licenses.md](third-party-licenses.md).
+
+- Ten imported modules have a license file at the version in `go.mod` and `go.sum`.
+  Five of them are in the import graph of the packaged `ruptiq-pair`,
+  `ruptiq-diagnose`, and `ruptiq-validate-runs` commands.
+- Those five include Apache-2.0 modules that ship a `NOTICE` file, and BSD
+  modules whose text asks for the copyright and disclaimer to travel with a
+  binary distribution. The CLI archives still contain only Ruptiq's MIT
+  `LICENSE`. This update does not decide whether that satisfies those texts.
+- k6 v2.3.0, the version pinned in CI, is GNU AGPL version 3. The archives do
+  not contain k6.
+- Redistribution review stays open until the notices that belong with an
+  official binary are chosen and added. No packaging change was made here.
+
 ## A. Current deliverables
 
 Implemented and covered by code, tests, or a recorded run:
@@ -269,7 +287,10 @@ items are still open. Third-party review and a versioned release are not resolve
 - [x] The repository is public and has no GitHub Releases.
 - [x] Owner selected the MIT License on 11 November 2026. Root `LICENSE` is
       added in this change. The `d1d1245` tree recorded above had no license file.
-- [ ] Owner reviews third-party module licenses before redistribution.
+- [ ] Third-party license texts have been read
+      ([docs/third-party-licenses.md](third-party-licenses.md)). The CLI archives
+      still omit the Apache `NOTICE` files and the BSD notice text for modules
+      linked into the three commands. That redistribution step is open.
 - [ ] Owner decides whether to create a versioned, retained release, and whether
       the binaries will be signed.
 - [ ] Packaged Linux ARM64 binaries have been executed on that OS.
