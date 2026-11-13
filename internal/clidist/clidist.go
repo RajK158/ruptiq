@@ -28,6 +28,9 @@ const ReadmeName = "README.md"
 // LicenseName is the project license stored at the archive root.
 const LicenseName = "LICENSE"
 
+// NoticesName is the third-party license bundle stored at the archive root.
+const NoticesName = "THIRD_PARTY_NOTICES.txt"
+
 // Command is one program copied into every archive.
 type Command struct {
 	Name       string
@@ -79,7 +82,7 @@ func (p Platform) Executable(command string) string {
 
 // Contents are the root entries of p's archive, in archive order.
 func (p Platform) Contents() []string {
-	names := []string{ReadmeName, LicenseName}
+	names := []string{ReadmeName, LicenseName, NoticesName}
 	for _, command := range Commands {
 		names = append(names, p.Executable(command.Name))
 	}
@@ -108,6 +111,10 @@ func Run(ctx context.Context, moduleRoot, outDir string) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	notices, err := readProjectNotices(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
 	staging, err := os.MkdirTemp("", "ruptiq-cli-stage-")
 	if err != nil {
 		return nil, err
@@ -126,6 +133,9 @@ func Run(ctx context.Context, moduleRoot, outDir string) ([]Result, error) {
 			return nil, err
 		}
 		if err := os.WriteFile(filepath.Join(dir, LicenseName), license, 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, NoticesName), notices, 0o644); err != nil {
 			return nil, err
 		}
 		for _, command := range Commands {
@@ -257,7 +267,7 @@ func PackDirectory(dir, dest string, platform Platform) error {
 			return fmt.Errorf("missing %s for %s: %w", name, platform.ArchiveName(), err)
 		}
 		mode := int64(0o755)
-		if name == ReadmeName || name == LicenseName {
+		if name == ReadmeName || name == LicenseName || name == NoticesName {
 			mode = 0o644
 		}
 		entries = append(entries, Entry{Name: name, Body: body, Mode: mode})
@@ -346,7 +356,17 @@ func fileSHA256(path string) (string, int64, error) {
 // readProjectLicense returns the exact bytes of the repository LICENSE.
 // A missing or unreadable file is an error. Packaging does not invent a license.
 func readProjectLicense(moduleRoot string) ([]byte, error) {
-	path := filepath.Join(moduleRoot, LicenseName)
+	return readProjectFile(moduleRoot, LicenseName)
+}
+
+// readProjectNotices returns the exact bytes of THIRD_PARTY_NOTICES.txt.
+// A missing, unreadable, or empty file is an error. Packaging does not download notices.
+func readProjectNotices(moduleRoot string) ([]byte, error) {
+	return readProjectFile(moduleRoot, NoticesName)
+}
+
+func readProjectFile(moduleRoot, name string) ([]byte, error) {
+	path := filepath.Join(moduleRoot, name)
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -365,8 +385,9 @@ func readmeText(p Platform) string {
 	return fmt.Sprintf(`# Ruptiq CLI (%s/%s)
 
 This is an unsigned development build, not a versioned or signed release.
-Ruptiq is licensed under the MIT License. The full text is included in this archive as LICENSE.
-That text is the license for this project. It does not state the terms of third-party dependencies.
+LICENSE is Ruptiq's MIT License.
+THIRD_PARTY_NOTICES.txt contains the license and attribution notices for Go dependencies bundled in these executables. Those terms belong to their copyright holders.
+k6 is an external program and is not bundled.
 
 The executables are ruptiq-pair%s, ruptiq-diagnose%s, and ruptiq-validate-runs%s.
 Go is not required to run them. k6 is not included.

@@ -39,13 +39,13 @@ func TestExecutableNames(t *testing.T) {
 	linux := Platform{GOOS: "linux", GOARCH: "amd64"}.Contents()
 	darwin := Platform{GOOS: "darwin", GOARCH: "arm64"}.Contents()
 	windows := Platform{GOOS: "windows", GOARCH: "amd64"}.Contents()
-	if stringsJoin(linux) != "README.md LICENSE ruptiq-pair ruptiq-diagnose ruptiq-validate-runs" {
+	if stringsJoin(linux) != "README.md LICENSE THIRD_PARTY_NOTICES.txt ruptiq-pair ruptiq-diagnose ruptiq-validate-runs" {
 		t.Fatalf("linux contents %v", linux)
 	}
 	if stringsJoin(darwin) != stringsJoin(linux) {
 		t.Fatalf("darwin contents %v", darwin)
 	}
-	if stringsJoin(windows) != "README.md LICENSE ruptiq-pair.exe ruptiq-diagnose.exe ruptiq-validate-runs.exe" {
+	if stringsJoin(windows) != "README.md LICENSE THIRD_PARTY_NOTICES.txt ruptiq-pair.exe ruptiq-diagnose.exe ruptiq-validate-runs.exe" {
 		t.Fatalf("windows contents %v", windows)
 	}
 }
@@ -85,7 +85,7 @@ func TestPackOmitsUnrelatedAndRejectsMissing(t *testing.T) {
 		t.Fatalf("tar.gz magic %x", magic)
 	}
 	modes := archiveModes(t, dest)
-	if modes["README.md"] != 0o644 || modes["LICENSE"] != 0o644 || modes["ruptiq-pair"] != 0o755 || modes["ruptiq-diagnose"] != 0o755 || modes["ruptiq-validate-runs"] != 0o755 {
+	if modes["README.md"] != 0o644 || modes["LICENSE"] != 0o644 || modes["THIRD_PARTY_NOTICES.txt"] != 0o644 || modes["ruptiq-pair"] != 0o755 || modes["ruptiq-diagnose"] != 0o755 || modes["ruptiq-validate-runs"] != 0o755 {
 		t.Fatalf("tar modes %v", modes)
 	}
 
@@ -115,7 +115,7 @@ func TestPackOmitsUnrelatedAndRejectsMissing(t *testing.T) {
 		t.Fatalf("zip entry %q", body)
 	}
 	zipModes := zipFileModes(t, zipDest)
-	if zipModes["LICENSE"] != 0o644 || zipModes["ruptiq-pair.exe"] != 0o755 {
+	if zipModes["LICENSE"] != 0o644 || zipModes["THIRD_PARTY_NOTICES.txt"] != 0o644 || zipModes["ruptiq-pair.exe"] != 0o755 {
 		t.Fatalf("zip modes %v", zipModes)
 	}
 
@@ -130,6 +130,20 @@ func TestPackOmitsUnrelatedAndRejectsMissing(t *testing.T) {
 		t.Fatalf("partial archive exists: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "LICENSE"), []byte("LICENSE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(filepath.Join(dir, NoticesName)); err != nil {
+		t.Fatal(err)
+	}
+	missingNotices := filepath.Join(t.TempDir(), "missing-notices.tar.gz")
+	if err := PackDirectory(dir, missingNotices, platform); err == nil {
+		t.Fatal("missing notices file was packaged")
+	}
+	if _, err := os.Stat(missingNotices); !os.IsNotExist(err) {
+		t.Fatalf("partial archive exists: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, NoticesName), []byte(NoticesName), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,6 +272,7 @@ func TestIdentifyHeaders(t *testing.T) {
 
 func TestProjectLicenseBytes(t *testing.T) {
 	license := []byte("Copyright (c) 2026 RajK158\nMIT License\n")
+	notice := []byte("third-party-notice-bytes\n")
 	for _, platform := range []Platform{
 		{GOOS: "linux", GOARCH: "amd64"},
 		{GOOS: "darwin", GOARCH: "arm64"},
@@ -269,6 +284,10 @@ func TestProjectLicenseBytes(t *testing.T) {
 			mode := os.FileMode(0o755)
 			if name == LicenseName {
 				body = license
+				mode = 0o644
+			}
+			if name == NoticesName {
+				body = notice
 				mode = 0o644
 			}
 			if name == ReadmeName {
@@ -288,6 +307,13 @@ func TestProjectLicenseBytes(t *testing.T) {
 		}
 		if !bytes.Equal(got, license) {
 			t.Fatalf("%s LICENSE bytes differ", platform.ArchiveName())
+		}
+		got, err = ReadArchiveFile(dest, NoticesName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, notice) {
+			t.Fatalf("%s notice bytes differ", platform.ArchiveName())
 		}
 	}
 }
@@ -326,6 +352,101 @@ func TestReadProjectLicense(t *testing.T) {
 	}
 	if bytes.Contains([]byte(text), []byte("third-party dependencies are MIT")) {
 		t.Fatal("archive README claims third-party dependencies are MIT")
+	}
+	if !bytes.Contains([]byte(text), []byte("THIRD_PARTY_NOTICES.txt")) || !bytes.Contains([]byte(text), []byte("not bundled")) {
+		t.Fatal("archive README does not describe the notice bundle and external k6")
+	}
+}
+
+func TestReadProjectNotices(t *testing.T) {
+	root := t.TempDir()
+	if _, err := readProjectNotices(root); err == nil {
+		t.Fatal("missing notices file was accepted")
+	}
+	if err := os.Mkdir(filepath.Join(root, NoticesName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readProjectNotices(root); err == nil {
+		t.Fatal("unreadable notices file was accepted")
+	}
+	if err := os.Remove(filepath.Join(root, NoticesName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, NoticesName), []byte(" \n\t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readProjectNotices(root); err == nil {
+		t.Fatal("empty notices file was accepted")
+	}
+	want := []byte("third-party-notice-bytes\n")
+	if err := os.WriteFile(filepath.Join(root, NoticesName), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readProjectNotices(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("notice bytes %q", got)
+	}
+}
+
+func TestTrackedNoticesCoverPackagedModules(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), NoticesName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := []string{
+		"github.com/prometheus/client_model v0.6.3",
+		"github.com/prometheus/common v0.73.1",
+		"github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822",
+		"github.com/pandatix/go-abnf v0.5.3",
+		"google.golang.org/protobuf v1.36.12",
+		"Apache License",
+		"Version 2.0, January 2004",
+		"Data model artifacts for Prometheus.",
+		"Common libraries shared by Prometheus Go components.",
+		"Open Knowledge Foundation Ltd.",
+		"Lucas TESSON - PandatiX",
+		"Copyright (c) 2018 The Go Authors.",
+		"Permission is hereby granted",
+		"Redistribution and use in source and binary forms",
+	}
+	for _, text := range required {
+		if !bytes.Contains(body, []byte(text)) {
+			t.Fatalf("tracked notices missing %q", text)
+		}
+	}
+	absent := []string{
+		"GNU AFFERO GENERAL PUBLIC LICENSE",
+		"github.com/prometheus/client_golang v1.25.0",
+		"github.com/prometheus/procfs v0.22.0",
+		"github.com/beorn7/perks v1.0.1",
+		"github.com/cespare/xxhash/v2 v2.3.0",
+		"golang.org/x/sys v0.49.0",
+	}
+	for _, text := range absent {
+		if bytes.Contains(body, []byte(text)) {
+			t.Fatalf("tracked notices include %q", text)
+		}
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
 	}
 }
 

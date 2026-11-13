@@ -45,6 +45,16 @@ modules this repository imports have now been read. The notes are in
 - Redistribution review stays open until the notices that belong with an
   official binary are chosen and added. No packaging change was made here.
 
+## Status update — 12 November 2026, third-party notice bundle
+
+The update above recorded that CLI archives contained only Ruptiq's MIT
+`LICENSE`. Current archives also contain `THIRD_PARTY_NOTICES.txt`. That file
+copies the license text, and the `NOTICE` text where one exists, for the five
+Go modules imported by the three packaged commands. k6 is still not in the
+archives. Modules used only by the regression lab and Inventory Service are
+not in the bundle. This update does not decide that the bundle satisfies every
+redistribution condition, and it does not publish a release.
+
 ## A. Current deliverables
 
 Implemented and covered by code, tests, or a recorded run:
@@ -287,10 +297,16 @@ items are still open. Third-party review and a versioned release are not resolve
 - [x] The repository is public and has no GitHub Releases.
 - [x] Owner selected the MIT License on 11 November 2026. Root `LICENSE` is
       added in this change. The `d1d1245` tree recorded above had no license file.
-- [ ] Third-party license texts have been read
-      ([docs/third-party-licenses.md](third-party-licenses.md)). The CLI archives
-      still omit the Apache `NOTICE` files and the BSD notice text for modules
-      linked into the three commands. That redistribution step is open.
+- [x] Third-party license texts for imported modules were read on
+      11 November 2026 ([docs/third-party-licenses.md](third-party-licenses.md)).
+      That review recorded that the archives then omitted the Apache `NOTICE`
+      files and the BSD notice text.
+- [x] Each current CLI archive includes `THIRD_PARTY_NOTICES.txt` for the five
+      Go modules linked into the three commands. The file was added after the
+      review that recorded the omission.
+- [ ] Whether those notices satisfy each dependency's redistribution conditions
+      is not decided. Modules used only by the regression lab and Inventory
+      Service are not in the archive. k6 is not bundled.
 - [ ] Owner decides whether to create a versioned, retained release, and whether
       the binaries will be signed.
 - [ ] Packaged Linux ARM64 binaries have been executed on that OS.

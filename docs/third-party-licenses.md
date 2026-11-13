@@ -5,6 +5,20 @@ not a legal opinion, and it does not say that redistribution already complies
 with those texts. Ruptiq's own [MIT License](../LICENSE) applies to this
 project. It does not replace the license of a dependency.
 
+## Status update — 12 November 2026, notice bundle
+
+The sections below describe the archive as it was at
+`1dffdc18dd6cc82541751878a76e5f9b728999b3`: `README.md`, Ruptiq's MIT
+`LICENSE`, and the three executables. They record that the third-party license
+and `NOTICE` texts were not in that archive.
+
+Current archives also contain `THIRD_PARTY_NOTICES.txt`. That file copies the
+license text, and the `NOTICE` text where one exists, for the five modules
+imported by `ruptiq-pair`, `ruptiq-diagnose`, and `ruptiq-validate-runs`. It
+does not include k6, and it does not include the five modules used only by the
+regression lab and Inventory Service. Adding the file does not decide that
+every redistribution condition is satisfied.
+
 The repository commit is `1dffdc18dd6cc82541751878a76e5f9b728999b3`
 (`Merge pull request #23 from RajK158/chore/add-mit-license`).
 
@@ -120,9 +134,10 @@ does not mean the packaged CLI contains that module.
 ## C. External tools
 
 Grafana k6 is not a Go module in this repository. `ruptiq-pair` and
-`ruptiq-diagnose` start it as a separate process. `internal/clidist` archive
-contents are `README.md`, `LICENSE`, and the three executables. k6 is not one
-of those files.
+`ruptiq-diagnose` start it as a separate process. At the commit reviewed above,
+`internal/clidist` archive contents are `README.md`, `LICENSE`, and the three
+executables. k6 is not one of those files. The later notice bundle is described
+in the status update at the top of this file.
 
 The license file read for this review is `LICENSE.md` at tag `v2.3.0`:
 `https://github.com/grafana/k6/blob/v2.3.0/LICENSE.md`. That file is the
@@ -155,10 +170,12 @@ Supported by the text that was read:
   file are included in a `NOTICE`, in source or documentation, or in a display
   where third-party notices normally appear.
 
-The current CLI archive does not contain those third-party license files or
-`NOTICE` files. It contains Ruptiq's `LICENSE` only. This review does not
-conclude that the omission violates a condition. It does record that the
-texts above are not in the archive.
+At the commit reviewed above, the CLI archive does not contain those
+third-party license files or `NOTICE` files. It contains Ruptiq's `LICENSE`
+only. This review does not conclude that the omission violates a condition. It
+does record that the texts above are not in that archive. The later
+`THIRD_PARTY_NOTICES.txt` is a package change after this review, not part of
+the observation recorded here.
 
 Not decided here:
 
@@ -176,9 +193,9 @@ Verified from the files named above: all ten imported third-party modules.
 Nothing in that set was left without a readable license file. The 23 modules
 that are not imported were not verified.
 
-Already supplied: Ruptiq's MIT `LICENSE` in the repository and in each CLI
-archive. The archive README says that MIT text does not state third-party
-terms. No third-party `NOTICE` is included.
+Already supplied at this review: Ruptiq's MIT `LICENSE` in the repository and
+in each CLI archive. The archive README says that MIT text does not state
+third-party terms. No third-party `NOTICE` is included.
 
 Before an official binary release, the archive for the three commands should
 gain the license text, and where present the `NOTICE` text, for the five
@@ -190,10 +207,15 @@ modules in its import graph:
 - `github.com/pandatix/go-abnf` v0.5.3
 - `google.golang.org/protobuf` v1.36.12
 
+That list is the recommendation of this review. A later package change copies
+those five texts into `THIRD_PARTY_NOTICES.txt`. Whether the copy satisfies
+each license is not decided here. The five modules outside the packaged
+commands are still not in the archive. Packaging was not changed in this
+review.
+
 If a later release also ships `demo/regression-lab` or the Inventory Service
 binary, the same kind of notice is relevant for `client_golang`, `procfs`,
 `perks`, `xxhash`, and `golang.org/x/sys` at the versions in the table.
-Packaging was not changed in this review.
 
 k6 stays an external AGPL-3.0 program at the v2.3.0 pin. Bundling it would be
 a separate decision.

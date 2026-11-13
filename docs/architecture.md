@@ -1165,8 +1165,9 @@ following push to main. A compatible Linux machine can run
 `ruptiq-validate-runs` with `CGO_ENABLED=0` and `-trimpath`. The targets are linux/amd64,
 linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64. Linux and macOS archives are
 `.tar.gz`. Windows is `.zip`. Each archive contains those three executables, a short
-README, and the project's MIT `LICENSE`. The MIT text does not state the terms of
-third-party dependencies. Source, experiments, k6, and
+README, the project's MIT `LICENSE`, and `THIRD_PARTY_NOTICES.txt` for the five Go
+modules those commands import. k6 is not included. The notice file does not decide that
+every redistribution condition is satisfied. Source, experiments, k6, and
 Docker files are not included. `dist/ruptiq-cli-SHA256SUMS.txt` records a SHA-256 for every
 archive. The output directory is gitignored.
 
