@@ -45,12 +45,15 @@ What it does not do: apply a code fix, name a proven root cause, use an AI diagn
 or run a statistical significance test. There is no GUI, hosted dashboard, or run database.
 k6 is installed separately. Development CLI archives are unsigned.
 Ruptiq is licensed under the [MIT License](LICENSE).
+Notices for the Go modules linked into the packaged commands are in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+k6 is an external program and is not included there.
 
 ## Install Ruptiq CLI
 
 Prebuilt development archives contain `ruptiq-pair`, `ruptiq-diagnose`, `ruptiq-validate-runs`,
-and `LICENSE`, the MIT License for this project. That file does not state the terms of
-third-party dependencies.
+`LICENSE`, and `THIRD_PARTY_NOTICES.txt`. `LICENSE` is the MIT License for this project.
+`THIRD_PARTY_NOTICES.txt` contains the license and attribution notices for the Go dependencies
+bundled in those executables. k6 is not included.
 The `CLI distribution builds` job uploads them as a temporary GitHub Actions artifact named
 `ruptiq-cli-development`. Downloading that artifact gives a zip of the five platform archives
 and `ruptiq-cli-SHA256SUMS.txt`. It is not a GitHub Release, not a Git tag, and not a signed

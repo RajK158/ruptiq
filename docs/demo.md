@@ -380,4 +380,4 @@ The design write-up is [docs/architecture.md](architecture.md).
 - k6 is an external program. This repository does not ship it.
 - The CLI archives are unsigned development builds. CI does not execute the Windows or macOS binaries.
 - Windows and macOS can build and, on a machine where the tools are installed, run the demo. The GitHub workflow that runs the demo path is Ubuntu.
-- Ruptiq is licensed under the MIT License. The text is [LICENSE](../LICENSE). That file does not state the terms of third-party dependencies.
+- Ruptiq is licensed under the MIT License. The text is [LICENSE](../LICENSE). Notices for Go modules linked into the packaged commands are in [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt). k6 is not included. That notice file does not decide that every redistribution condition is satisfied.
