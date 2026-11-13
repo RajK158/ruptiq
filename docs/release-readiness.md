@@ -45,7 +45,7 @@ modules this repository imports have now been read. The notes are in
 - Redistribution review stays open until the notices that belong with an
   official binary are chosen and added. No packaging change was made here.
 
-## Status update — 11 November 2026, third-party notice bundle
+## Status update — 12 November 2026, third-party notice bundle
 
 The update above recorded that CLI archives contained only Ruptiq's MIT
 `LICENSE`. Current archives also contain `THIRD_PARTY_NOTICES.txt`. That file

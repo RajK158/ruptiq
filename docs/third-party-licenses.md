@@ -5,7 +5,7 @@ not a legal opinion, and it does not say that redistribution already complies
 with those texts. Ruptiq's own [MIT License](../LICENSE) applies to this
 project. It does not replace the license of a dependency.
 
-## Status update — 11 November 2026, notice bundle
+## Status update — 12 November 2026, notice bundle
 
 The sections below describe the archive as it was at
 `1dffdc18dd6cc82541751878a76e5f9b728999b3`: `README.md`, Ruptiq's MIT
